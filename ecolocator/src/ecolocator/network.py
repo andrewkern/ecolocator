@@ -2,19 +2,21 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import backend as K
 
+
 @tf.keras.utils.register_keras_serializable(name="euclid_loss")
 def euclid_loss(y_true, y_pred):
     """Euclidean distance between 2-D coordinates (location)."""
     return K.sqrt(K.sum(K.square(y_pred - y_true), axis=-1))
 
+
 def build_network(
-        n_snps: int,
-        num_covs: int,
-        nlayers: int = 10, 
-        width: int = 256, 
-        dropout_prop: float = 0.25,
-        loc_weight: float = 1.0, 
-        env_weight: float = 1.0, 
+    n_snps: int,
+    num_covs: int,
+    nlayers: int = 10,
+    width: int = 256,
+    dropout_prop: float = 0.25,
+    loc_weight: float = 1.0,
+    env_weight: float = 1.0,
 ) -> tf.keras.Model:
     geno_input = tf.keras.Input(shape=(n_snps,), name="geno_input")
     trunk = tf.keras.layers.BatchNormalization()(geno_input)
@@ -25,7 +27,9 @@ def build_network(
         trunk = tf.keras.layers.Dense(width, activation="elu")(trunk)
     loc_output = tf.keras.layers.Dense(2)(tf.keras.layers.Dense(2)(trunk))
     if num_covs > 0:
-        env_output = tf.keras.layers.Dense(num_covs)(tf.keras.layers.Dense(num_covs)(trunk))
+        env_output = tf.keras.layers.Dense(num_covs)(
+            tf.keras.layers.Dense(num_covs)(trunk)
+        )
         model = tf.keras.Model(inputs=geno_input, outputs=[loc_output, env_output])
         losses = [euclid_loss, "mse"]
         loss_weights = [loc_weight, env_weight]
@@ -39,6 +43,7 @@ def build_network(
         loss_weights=loss_weights,
     )
     return model
+
 
 def build_callbacks(
     patience: int = 100,
@@ -61,6 +66,7 @@ def build_callbacks(
         min_lr=0,
     )
     return [earlystop, reducelr]
+
 
 def train_network(
     model: tf.keras.Model,

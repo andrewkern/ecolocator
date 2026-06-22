@@ -51,6 +51,7 @@ def example_data(tmp_path_factory):
 
     return (vcf_path, zarr_path, matrix_path, sample_data_path)
 
+
 @pytest.fixture(scope="session")
 def no_covariate_data(tmp_path_factory):
     num_individuals = 5
@@ -88,10 +89,12 @@ def no_covariate_data(tmp_path_factory):
 
 @pytest.fixture
 def sample_locs():
-    return np.array([
-        [1.0, 2.0, 10.0, 100.0,  5.0],
-        [2.0, 3.0, 20.0, 200.0, 10.0],
-        [3.0, 4.0, 30.0, 300.0, 15.0],
-        [4.0, 5.0, 40.0, 400.0, 20.0],
-        [5.0, 6.0, 50.0, 500.0, 25.0],
-    ])
+    return np.array(
+        [
+            [1.0, 2.0, 10.0, 100.0, 5.0],
+            [2.0, 3.0, 20.0, 200.0, 10.0],
+            [3.0, 4.0, 30.0, 300.0, 15.0],
+            [4.0, 5.0, 40.0, 400.0, 20.0],
+            [5.0, 6.0, 50.0, 500.0, 25.0],
+        ]
+    )

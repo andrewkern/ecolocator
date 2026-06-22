@@ -4,7 +4,14 @@ import os
 import json
 import logging
 import tensorflow as tf
-from .utils import load_genotypes, sort_samples, normalize_locs, filter_snps, replace_missing_data, back_transform_env
+from .utils import (
+    load_genotypes,
+    sort_samples,
+    normalize_locs,
+    filter_snps,
+    replace_missing_data,
+    back_transform_env,
+)
 from .network import build_network, train_network, euclid_loss
 
 
@@ -119,30 +126,38 @@ class EcoLocator:
                 f"Found {num_covs} covariates in sample data. Proceeding with location data only."
             )
 
-        (self.meanlong_, self.sdlong_, self.meanlat_, self.sdlat_,
-        self.means_, self.sds_, self.transforms_, locs) = normalize_locs(
-            locs, transforms=self.cov_transforms, cov_names=cov_names
-        )
+        (
+            self.meanlong_,
+            self.sdlong_,
+            self.meanlat_,
+            self.sdlat_,
+            self.means_,
+            self.sds_,
+            self.transforms_,
+            locs,
+        ) = normalize_locs(locs, transforms=self.cov_transforms, cov_names=cov_names)
 
-        genotypes, self._kept_snp_indices_ = filter_snps(genotypes, min_mac=min_mac, max_snps=max_snps, rng=rng)
+        genotypes, self._kept_snp_indices_ = filter_snps(
+            genotypes, min_mac=min_mac, max_snps=max_snps, rng=rng
+        )
         ac = replace_missing_data(genotypes, rng=rng)
 
         train = np.argwhere(~np.isnan(locs[:, 0])).flatten()
-        test  = rng.choice(train, round((1 - train_split) * len(train)), replace=False)
+        test = rng.choice(train, round((1 - train_split) * len(train)), replace=False)
         train = np.array([x for x in train if x not in test])
 
-        traingen  = np.transpose(ac[:, train])
-        testgen   = np.transpose(ac[:, test])
+        traingen = np.transpose(ac[:, train])
+        testgen = np.transpose(ac[:, test])
 
         if num_covs > 0:
             trainlocs = [locs[train][:, 0:2], locs[train][:, 2:]]
-            testlocs  = [locs[test][:, 0:2],  locs[test][:, 2:]]
+            testlocs = [locs[test][:, 0:2], locs[test][:, 2:]]
         else:
             trainlocs = locs[train][:, 0:2]
-            testlocs  = locs[test][:, 0:2]
+            testlocs = locs[test][:, 0:2]
 
         self.num_covs_ = num_covs
-        self.seed_ = seed 
+        self.seed_ = seed
         self.model_ = build_network(
             n_snps=traingen.shape[1],
             num_covs=num_covs,
@@ -163,8 +178,7 @@ class EcoLocator:
             patience=patience,
             verbose=verbose,
         )
-        return self 
-
+        return self
 
     def predict(
         self,
@@ -182,10 +196,9 @@ class EcoLocator:
 
         prediction = self.model_.predict(predgen)
         if self.num_covs_ > 0:
-            pred_longlat = (
-                prediction[0] * np.array([self.sdlong_, self.sdlat_])
-                + np.array([self.meanlong_, self.meanlat_])
-            )
+            pred_longlat = prediction[0] * np.array(
+                [self.sdlong_, self.sdlat_]
+            ) + np.array([self.meanlong_, self.meanlat_])
             pred_env = back_transform_env(
                 prediction[1], self.means_, self.sds_, self.transforms_
             )
@@ -196,11 +209,10 @@ class EcoLocator:
             result.insert(0, "sampleID", samples[pred])
             return result
         else:
-            pred_longlat = (
-                prediction * np.array([self.sdlong_, self.sdlat_])
-                + np.array([self.meanlong_, self.meanlat_])
-            )
-            
+            pred_longlat = prediction * np.array(
+                [self.sdlong_, self.sdlat_]
+            ) + np.array([self.meanlong_, self.meanlat_])
+
             result = pd.DataFrame(pred_longlat, columns=["x", "y"])
             result.insert(0, "sampleID", samples[pred])
             return result
@@ -218,7 +230,7 @@ class EcoLocator:
         train_split: float = 0.9,
         seed: int = None,
         verbose: int = 1,
-    ) -> pd.DataFrame:    
+    ) -> pd.DataFrame:
         rng = np.random.default_rng(seed)
         genotypes, samples = self._get_genotypes(genotype_path)
         sample_data, locs = sort_samples(samples, sample_data_path)
@@ -226,7 +238,9 @@ class EcoLocator:
         num_covs = locs.shape[1] - 2
         cov_names = [c for c in sample_data.columns if c not in {"sampleID2", "x", "y"}]
 
-        genotypes, _ = filter_snps(genotypes, min_mac=min_mac, max_snps=max_snps, rng=rng)
+        genotypes, _ = filter_snps(
+            genotypes, min_mac=min_mac, max_snps=max_snps, rng=rng
+        )
         ac = replace_missing_data(genotypes, rng=rng)
 
         known = np.argwhere(~np.isnan(locs[:, 0])).flatten()
@@ -235,31 +249,35 @@ class EcoLocator:
         all_predictions = []
 
         for fold, i in enumerate(known, start=1):
-            logging.info(f"LOO iteration {fold} of {len(known)}: holding out {samples[i]}")
+            logging.info(
+                f"LOO iteration {fold} of {len(known)}: holding out {samples[i]}"
+            )
             loo_locs = locs.copy()
             loo_locs[i] = np.nan
 
-            
-            (meanlong, sdlong, meanlat, sdlat,
-            means, sds, transforms, norm_locs) = normalize_locs(
-                loo_locs, transforms=self.cov_transforms, cov_names=cov_names
+            (meanlong, sdlong, meanlat, sdlat, means, sds, transforms, norm_locs) = (
+                normalize_locs(
+                    loo_locs, transforms=self.cov_transforms, cov_names=cov_names
+                )
             )
 
             train = np.argwhere(~np.isnan(norm_locs[:, 0])).flatten()
-            test  = rng.choice(train, round((1 - train_split) * len(train)), replace=False)
+            test = rng.choice(
+                train, round((1 - train_split) * len(train)), replace=False
+            )
             train = np.array([x for x in train if x not in test])
 
-            traingen  = np.transpose(ac[:, train])
-            testgen   = np.transpose(ac[:, test])
+            traingen = np.transpose(ac[:, train])
+            testgen = np.transpose(ac[:, test])
 
             if num_covs > 0:
                 trainlocs = [norm_locs[train][:, 0:2], norm_locs[train][:, 2:]]
-                testlocs  = [norm_locs[test][:, 0:2],  norm_locs[test][:, 2:]]
+                testlocs = [norm_locs[test][:, 0:2], norm_locs[test][:, 2:]]
             else:
                 trainlocs = norm_locs[train][:, 0:2]
-                testlocs  = norm_locs[test][:, 0:2]
+                testlocs = norm_locs[test][:, 0:2]
 
-            predgen   = np.transpose(ac[:, [i]])
+            predgen = np.transpose(ac[:, [i]])
 
             model = build_network(
                 n_snps=traingen.shape[1],
@@ -271,55 +289,68 @@ class EcoLocator:
                 env_weight=self.env_weight,
             )
             train_network(
-                model, traingen, testgen, trainlocs, testlocs,
-                max_epochs=max_epochs, batch_size=batch_size,
-                patience=patience, verbose=verbose,
+                model,
+                traingen,
+                testgen,
+                trainlocs,
+                testlocs,
+                max_epochs=max_epochs,
+                batch_size=batch_size,
+                patience=patience,
+                verbose=verbose,
             )
 
-            prediction  = model.predict(predgen)
+            prediction = model.predict(predgen)
             if num_covs > 0:
-                pred_longlat = (
-                    prediction[0] * np.array([sdlong, sdlat])
-                    + np.array([meanlong, meanlat])
+                pred_longlat = prediction[0] * np.array([sdlong, sdlat]) + np.array(
+                    [meanlong, meanlat]
                 )
                 pred_env = back_transform_env(prediction[1], means, sds, transforms)
 
-                row = {"sampleID": samples[i], "x": pred_longlat[0, 0], "y": pred_longlat[0, 1]}
+                row = {
+                    "sampleID": samples[i],
+                    "x": pred_longlat[0, 0],
+                    "y": pred_longlat[0, 1],
+                }
                 for j, name in enumerate(cov_names):
                     row[name] = pred_env[0, j]
                 all_predictions.append(row)
             else:
-                pred_longlat = (
-                    prediction * np.array([sdlong, sdlat])
-                    + np.array([meanlong, meanlat])
+                pred_longlat = prediction * np.array([sdlong, sdlat]) + np.array(
+                    [meanlong, meanlat]
                 )
 
-                row = {"sampleID": samples[i], "x": pred_longlat[0, 0], "y": pred_longlat[0, 1]}
+                row = {
+                    "sampleID": samples[i],
+                    "x": pred_longlat[0, 0],
+                    "y": pred_longlat[0, 1],
+                }
                 all_predictions.append(row)
 
-            del model 
+            del model
             tf.keras.backend.clear_session()
 
         return pd.DataFrame(all_predictions)
-        
+
     def shap_values(
         self,
-        genotype_path: str, 
+        genotype_path: str,
         sample_data_path: str,
-        train_genotype_path: str, 
-        train_sample_data_path: str, 
-        background_size: int = 100, 
+        train_genotype_path: str,
+        train_sample_data_path: str,
+        background_size: int = 100,
         min_maf: float = None,
         seed: int = None,
         raw: bool = False,
     ) -> pd.DataFrame:
         import shap
+
         if not hasattr(self, "model_"):
             raise RuntimeError("EcoLocator must be fitted before calling shap_values")
 
         rng = np.random.default_rng(seed if seed is not None else self.seed_)
 
-        #load and filter training genos for bg
+        # load and filter training genos for bg
         train_genotypes, train_samples = self._get_genotypes(train_genotype_path)
         train_genotypes = train_genotypes[self._kept_snp_indices_, :, :]
         train_ac = replace_missing_data(train_genotypes, rng=rng)
@@ -327,7 +358,7 @@ class EcoLocator:
         known = np.argwhere(~np.isnan(train_locs[:, 0])).flatten()
         traingen = np.transpose(train_ac[:, known])
 
-        #load and filter pred genos
+        # load and filter pred genos
         pred_genotypes, pred_samples = self._get_genotypes(genotype_path)
         pred_genotypes = pred_genotypes[self._kept_snp_indices_, :, :]
         pred_ac = replace_missing_data(pred_genotypes)
@@ -335,27 +366,30 @@ class EcoLocator:
         unknown = np.argwhere(np.isnan(pred_locs[:, 0])).flatten()
         predgen = np.transpose(pred_ac[:, unknown])
 
-        #build bg
+        # build bg
         bg_size = min(background_size, traingen.shape[0])
         bg_idx = rng.choice(traingen.shape[0], bg_size, replace=False)
         background = traingen[bg_idx, :]
 
-        #wrap model heads
+        # wrap model heads
         if self.num_covs_ > 0:
-            model_loc = tf.keras.Model(inputs=self.model_.input, outputs=self.model_.output[0])
+            model_loc = tf.keras.Model(
+                inputs=self.model_.input, outputs=self.model_.output[0]
+            )
         else:
             model_loc = self.model_
 
-        #compute shap
+        # compute shap
         expl_loc = shap.GradientExplainer(model_loc, background)
         shap_loc = expl_loc.shap_values(predgen)
 
         if self.num_covs_ > 0:
-            model_env = tf.keras.Model(inputs=self.model_.input, outputs=self.model_.output[1])
+            model_env = tf.keras.Model(
+                inputs=self.model_.input, outputs=self.model_.output[1]
+            )
             expl_env = shap.GradientExplainer(model_env, background)
             shap_env = expl_env.shap_values(predgen)
-        
-        
+
         snp_ids = self._kept_snp_indices_
 
         # apply min_maf filter to snp index list before building either format
@@ -392,12 +426,12 @@ class EcoLocator:
         summary = {"snp_id": snp_ids}
         for var_idx, var in enumerate(output_cols):
             if var_idx < 2:
-                vals = shap_loc[:, :, var_idx]   # shape (n_samples, n_snps)
+                vals = shap_loc[:, :, var_idx]  # shape (n_samples, n_snps)
             else:
                 vals = shap_env[:, :, var_idx - 2]
             summary[var] = np.abs(vals).mean(axis=0)
         return pd.DataFrame(summary)
-        
+
     def _get_genotypes(self, genotype_path: str):
         if genotype_path.endswith(".zarr"):
             return load_genotypes(zarr_path=genotype_path)
@@ -405,4 +439,3 @@ class EcoLocator:
             return load_genotypes(vcf_path=genotype_path)
         else:
             return load_genotypes(matrix_path=genotype_path)
-
