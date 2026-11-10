@@ -180,8 +180,12 @@ def filter_snps(
     genotypes = genotypes[biallelic_mask, :, :]
     kept_indices = kept_indices[biallelic_mask]
     if min_mac != 1:
-        derived_counts = genotypes.count_alleles()[:, 1]
-        mac_mask = derived_counts >= min_mac
+        # Minor-allele count: the rarer of the two alleles at each biallelic
+        # site, so a site whose ancestral allele is the rare one is filtered
+        # the same way as one whose derived allele is.
+        counts = genotypes.count_alleles(max_allele=1)
+        minor_counts = np.minimum(counts[:, 0], counts[:, 1])
+        mac_mask = minor_counts >= min_mac
         genotypes = genotypes[mac_mask, :, :]
         kept_indices = kept_indices[mac_mask]
     if max_snps is not None:

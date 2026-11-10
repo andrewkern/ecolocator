@@ -232,6 +232,19 @@ def test_filter_snps_mac_filter():
     np.testing.assert_array_equal(kept_indices, [1, 2])
 
 
+def test_filter_snps_mac_counts_the_minor_allele():
+    """testing filter_snps filters on the rarer allele, ancestral or derived"""
+    gt = allel.GenotypeArray(
+        [
+            [[1, 1], [1, 1], [0, 1], [1, 1]],  # ancestral count 1 - removed
+            [[0, 0], [0, 0], [1, 0], [0, 0]],  # derived count 1 - removed
+            [[1, 1], [0, 1], [1, 0], [1, 1]],  # ancestral count 2 - kept
+        ]
+    )
+    filtered, kept_indices = filter_snps(gt, min_mac=2)
+    np.testing.assert_array_equal(kept_indices, [2])
+
+
 def test_filter_snps_min_mac_1_skips_mac_filter():
     """testing filter_snps with min_mac=1 skips MAC filtering, keeping all biallelic SNPs"""
     gt = allel.GenotypeArray(
