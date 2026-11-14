@@ -40,11 +40,15 @@ sample-metadata TSV must have columns `sampleID`, `x`, `y`, plus one column per
 environmental covariate. Leave `x`/`y` blank (or `NA`) for samples whose
 location is to be predicted.
 
-Hyperparameter and training flags: `--nlayers`, `--width`, `--dropout-prop`,
-`--loc-weight`, `--env-weight`, `--cov-transforms` (comma-separated
-per-covariate, e.g. `none,log,log`), `--max-epochs`, `--patience`,
-`--batch-size`, `--min-mac`, `--max-snps`, `--train-split`, `--seed`,
-`--verbose`. Run `ecolocator train --help` for the full list.
+Network flags: `--nlayers`, `--width`, `--dropout-prop`, `--input-dropout`,
+`--weight-decay` (the location trunk), `--head-width` (each covariate's
+correction head), `--score-l2` (the L2 penalty of the polygenic scores: one
+number, or comma-separated numbers to try; default `20,60,200,600`),
+`--loc-weight` and `--env-weight` (the balance between location and
+covariates). Training flags: `--cov-transforms`
+(comma-separated per-covariate, e.g. `none,log,log`), `--max-epochs`,
+`--patience`, `--batch-size`, `--min-mac`, `--max-snps`, `--train-split`,
+`--seed`, `--verbose`. Run `ecolocator train --help` for the full list.
 
 ---
 
@@ -104,6 +108,11 @@ With `--seed`, each fold's validation split and network initialization depend
 only on the seed and the fold index, so a fold gives the same prediction in
 any chunk. Results repeat exactly only with the same number of CPU threads.
 
+Each fold searches the score penalty as `train` does, so a fold costs one fit
+per penalty of `--score-l2`. To make LOO cheaper, give `--score-l2` one number,
+for example the penalty `train` chose on all samples (`score_l2_fitted` in the
+model's `params.json`).
+
 ### SHAP values from each fold
 
 `--shap-out FILE.npz` also computes, in every fold, the SHAP values of the
@@ -111,7 +120,9 @@ held-out sample from the model that did not see it (background:
 `--shap-background-size` training samples, default 100). The `.npz` file holds
 `sample_ids`, `snp_ids`, `outputs` (`x`, `y`, then covariates), and `values`
 with shape (folds, SNPs, outputs). The mean absolute value over folds is a
-SNP-importance score computed entirely on held-out samples.
+SNP-importance score computed entirely on held-out samples. The covariates'
+SHAP values include the path through the predicted location, so they account
+for everything the covariate prediction depends on.
 
 ---
 

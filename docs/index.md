@@ -8,8 +8,14 @@ predicted location only.
 
 The core idea: train a neural network on samples with known coordinates, then
 predict coordinates -- and environmental covariates -- for held-out samples. The
-network has a shared trunk feeding two output heads, one for geographic location
-`(x, y)` and one for environmental covariates.
+network has two routes from the genotypes. A deep trunk predicts geographic
+location `(x, y)`. For each environmental covariate, a linear polygenic score of
+all SNPs, plus a small correction head that also reads the predicted location,
+predicts the covariate. In training, the location enters the correction head
+through a gradient stop, so the covariate loss trains only the scores and the
+correction heads; SHAP values of a covariate still include the path through the
+predicted location. The L2 penalty of the scores is chosen in each fit from a
+small grid, by the covariates' validation loss.
 
 ## At a glance
 
