@@ -49,9 +49,10 @@ class EcoLocator:
 
     After the network, fit() trains a location route
     (network.build_location_route): for each covariate, a small head that
-    reads only the predicted location. On the validation samples,
-    ``env_weights_`` holds how much of each covariate the network predicts
-    beyond its location route (utils.env_weights). offset() uses these
+    reads only the predicted location. ``env_weights_`` holds how much of
+    each covariate the network predicts beyond its location route
+    (utils.env_weights), from cross-fitted predictions of all samples with
+    known coordinates (``weight_folds`` in fit()). offset() uses these
     weights for a genomic offset over several covariates.
     """
 
@@ -169,7 +170,19 @@ class EcoLocator:
         train_split: float = 0.9,
         seed: int = None,
         verbose: int = 1,
+        weight_folds: int = 5,
     ) -> "EcoLocator":
+        """Fit the network on the samples with known coordinates.
+
+        With covariates, fit() then trains the location route and computes
+        ``env_weights_``. With ``weight_folds`` of 2 or more, the weights
+        come from that many folds of the known samples: for each fold, the
+        network (with the penalty this fit chose) and its location route
+        are fitted on the other folds, and the fold's samples are
+        predicted. This costs ``weight_folds`` more network fits. With
+        ``weight_folds`` below 2, the weights come from the validation
+        samples of this fit only: cheaper, but noisy when there are few
+        validation samples."""
         rng = np.random.default_rng(seed)
 
         genotypes, samples, _ = self._get_genotypes(genotype_path)
@@ -230,7 +243,8 @@ class EcoLocator:
         self.score_l2_ = min(self.score_l2_losses_, key=self.score_l2_losses_.get)
         self.location_route_, self.env_weights_ = None, None
         if num_covs > 0:
-            self.location_route_, self.env_weights_ = self._fit_location_route(
+            self.location_route_ = self._fit_location_route(
+                self.model_,
                 traingen,
                 testgen,
                 trainlocs,
@@ -239,10 +253,111 @@ class EcoLocator:
                 max_epochs,
                 patience,
             )
+            if weight_folds >= 2:
+                self.env_weights_ = self._crossfit_weights(
+                    ac,
+                    np.concatenate([train, test]),
+                    locs,
+                    weight_folds,
+                    train_split,
+                    seed,
+                    rng,
+                    max_epochs,
+                    batch_size,
+                    patience,
+                    verbose,
+                )
+            if self.env_weights_ is None:
+                val_loc, val_env = self.model_.predict(testgen, verbose=0)
+                self.env_weights_ = env_weights(
+                    testlocs[1],
+                    val_env,
+                    self.location_route_.predict(val_loc, verbose=0),
+                )
         return self
+
+    def _crossfit_weights(
+        self,
+        ac,
+        known,
+        locs,
+        folds,
+        train_split,
+        seed,
+        rng,
+        max_epochs,
+        batch_size,
+        patience,
+        verbose,
+    ):
+        """Covariate weights from out-of-fold predictions of the known
+        samples (indices ``known`` into ac and the normalized locs). Each
+        fold's network uses the penalty of the main fit. Returns None (with
+        a warning) when a fold would leave fewer than 2 samples to fit."""
+        folds = min(folds, len(known))
+        smallest_rest = len(known) - int(np.ceil(len(known) / folds))
+        if smallest_rest - max(1, round((1 - train_split) * smallest_rest)) < 2:
+            logging.warning(
+                f"Too few samples ({len(known)}) for {folds}-fold covariate weights; "
+                "using the validation samples of the main fit."
+            )
+            return None
+        order = rng.permutation(known)
+        fold_of = np.arange(len(order)) % folds
+        observed, predicted, routes = [], [], []
+        for k in range(folds):
+            held, rest = order[fold_of == k], order[fold_of != k]
+            val = rng.choice(
+                rest, max(1, round((1 - train_split) * len(rest))), replace=False
+            )
+            fit_idx = np.setdiff1d(rest, val)
+            fold_seed = (
+                None
+                if seed is None
+                else int(np.random.SeedSequence([seed, 1, k]).generate_state(1)[0])
+            )
+            gen = {
+                n: np.transpose(ac[:, i])
+                for n, i in (("fit", fit_idx), ("val", val), ("held", held))
+            }
+            fit_locs = [locs[fit_idx][:, 0:2], locs[fit_idx][:, 2:]]
+            val_locs = [locs[val][:, 0:2], locs[val][:, 2:]]
+            model, _, _ = self._fit_network(
+                gen["fit"],
+                gen["val"],
+                fit_locs,
+                val_locs,
+                self.num_covs_,
+                fold_seed,
+                max_epochs,
+                batch_size,
+                patience,
+                verbose,
+                penalties=[self.score_l2_],
+            )
+            route = self._fit_location_route(
+                model,
+                gen["fit"],
+                gen["val"],
+                fit_locs,
+                val_locs,
+                fold_seed,
+                max_epochs,
+                patience,
+            )
+            held_loc, held_env = model.predict(gen["held"], verbose=0)
+            observed.append(locs[held][:, 2:])
+            predicted.append(np.reshape(held_env, (len(held), -1)))
+            routes.append(
+                np.reshape(route.predict(held_loc, verbose=0), (len(held), -1))
+            )
+        return env_weights(
+            np.concatenate(observed), np.concatenate(predicted), np.concatenate(routes)
+        )
 
     def _fit_location_route(
         self,
+        model,
         traingen,
         testgen,
         trainlocs,
@@ -252,27 +367,26 @@ class EcoLocator:
         patience,
         draws: int = 5,
     ):
-        """Train the location route on the fitted network's predicted
-        locations, and compute env_weights_ on the validation samples.
+        """Train a location route on a fitted network's predicted locations.
 
         The route's training inputs are the predicted locations of the
         training samples with dropout active, ``draws`` times: the network
         predicts training samples more closely than new samples, and
         dropout gives inputs with error, as the correction heads see them
         in training. Validation samples (predicted without dropout) stop the
-        training early. Returns the route and the weights."""
+        training early. Returns the route."""
         if seed is not None:
             tf.keras.utils.set_random_seed(seed)
         noisy = [
             np.concatenate(
                 [
-                    self.model_(traingen[i : i + 1024], training=True)[0].numpy()
+                    model(traingen[i : i + 1024], training=True)[0].numpy()
                     for i in range(0, len(traingen), 1024)
                 ]
             )
             for _ in range(draws)
         ]
-        val_loc, val_env = self.model_.predict(testgen, verbose=0)
+        val_loc = model.predict(testgen, verbose=0)[0]
         route = build_location_route(self.num_covs_, self.head_width, self.weight_decay)
         # The route has a few hundred weights, so Keras's cost per step
         # dominates its training: large batches, and early stopping that
@@ -294,8 +408,7 @@ class EcoLocator:
                 )
             ],
         )
-        val_route = route.predict(val_loc, verbose=0)
-        return route, env_weights(testlocs[1], val_env, val_route)
+        return route
 
     def _fit_network(
         self,
@@ -309,19 +422,24 @@ class EcoLocator:
         batch_size,
         patience,
         verbose,
+        penalties=None,
     ):
         """Fit the network on one split: traingen/trainlocs to fit, and
         testgen/testlocs for early stopping and the choice of the score
         penalty. Genotypes are standardized with the means and SDs of both
-        sets together. The network is fitted once per penalty of score_l2,
+        sets together. The network is fitted once per penalty of score_l2
+        (or of ``penalties``),
         from the same seed, and the fit with the lowest covariate validation
         loss (MSE) is kept. Returns that model, its history, and each
         penalty's validation loss."""
         known = np.concatenate([traingen, testgen])
         geno_mean, geno_sd = known.mean(axis=0), known.std(axis=0)
-        penalties = (
-            [0.0] if num_covs == 0 else [float(p) for p in np.atleast_1d(self.score_l2)]
-        )
+        if penalties is None:
+            penalties = (
+                [0.0]
+                if num_covs == 0
+                else [float(p) for p in np.atleast_1d(self.score_l2)]
+            )
         settings = {k: getattr(self, k) for k in HYPERPARAMETERS if k != "score_l2"}
         best, losses = None, {}
         for penalty in penalties:

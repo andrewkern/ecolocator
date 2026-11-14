@@ -317,7 +317,9 @@ def env_weights(
     def r2(y, *xs):
         x = np.column_stack([np.ones(len(y)), *xs])
         fitted = x @ np.linalg.lstsq(x, y, rcond=None)[0]
-        return 1 - np.sum((y - fitted) ** 2) / np.sum((y - y.mean()) ** 2)
+        total = np.sum((y - y.mean()) ** 2)
+        # A covariate without variance has nothing to explain.
+        return 1 - np.sum((y - fitted) ** 2) / total if total > 0 else 0.0
 
     return np.array(
         [

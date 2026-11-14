@@ -831,3 +831,40 @@ def test_save_load_keeps_location_route(tmp_path, example_data):
         b.drop(columns="sampleID").to_numpy(),
         rtol=1e-5,
     )
+
+
+def test_fit_weights_from_validation_only(example_data):
+    """testing that weight_folds below 2 gives weights from the validation samples, one per covariate"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=0,
+    )
+    assert model.env_weights_.shape == (3,)
+    assert np.all(model.env_weights_ >= 0)
+
+
+def test_crossfit_weights_leave_the_model_unchanged(example_data_30, tmp_path, caplog):
+    """testing that cross-fitted weights run without a fallback and do not change the fitted model's predictions"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    masked = str(_masked(sample_data_path, tmp_path))
+    preds = []
+    for folds in (0, 2):
+        model = EcoLocator(**SMALL).fit(
+            str(matrix_path),
+            str(sample_data_path),
+            max_epochs=3,
+            patience=2,
+            train_split=0.6,
+            seed=3,
+            weight_folds=folds,
+        )
+        preds.append(model.predict(str(matrix_path), masked).drop(columns="sampleID"))
+        assert np.all(model.env_weights_ >= 0)
+    assert "Too few samples" not in caplog.text
+    np.testing.assert_allclose(preds[0].to_numpy(), preds[1].to_numpy())

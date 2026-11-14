@@ -78,7 +78,7 @@ def train(
         "--out",
         "-o",
         file_okay=False,
-        help="Directory to save the fitted model (model.keras, arrays.npz, params.json).",
+        help="Directory to save the fitted model (model.keras, arrays.npz, params.json, location_route.keras).",
     ),
     nlayers: NLayers = 4,
     width: Width = 128,
@@ -111,6 +111,11 @@ def train(
     verbose: int = typer.Option(
         1, help="Keras verbosity (0=silent, 1=batches, 2=epochs)."
     ),
+    weight_folds: int = typer.Option(
+        5,
+        help="Folds for the covariate weights of the genomic offset; each costs one "
+        "more network fit. Below 2: weights from the validation samples only.",
+    ),
 ) -> None:
     """Train an EcoLocator model and save it to OUT."""
     model = _make_model(
@@ -136,6 +141,7 @@ def train(
         train_split=train_split,
         seed=seed,
         verbose=verbose,
+        weight_folds=weight_folds,
     )
     model.save(str(out))
     typer.echo(f"Saved model to {out}")

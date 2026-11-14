@@ -46,10 +46,14 @@ print(predictions)  # DataFrame: sampleID, x, y, <covariates...>
 ## Genomic offset
 
 After the network, `fit()` trains a location route: for each covariate, a
-small head that predicts it from the predicted location alone. On the
-validation samples, `model.env_weights_` holds how much of each covariate
-the network predicts beyond its location route, R²(c ~ route + prediction)
-− R²(c ~ route), floored at 0. A covariate that varies with location but
+small head that predicts it from the predicted location alone.
+`model.env_weights_` holds how much of each covariate the network predicts
+beyond its location route, R²(c ~ route + prediction) − R²(c ~ route),
+floored at 0, from cross-fitted predictions of all samples with known
+coordinates: `fit(..., weight_folds=5)` fits the network and its route on
+4/5 of the samples and predicts the rest, five times. This costs five more
+network fits; `weight_folds=0` uses the validation samples of the main fit
+only, which is cheaper but noisy when there are few of them. A covariate that varies with location but
 not with the genotypes beyond location gets a weight near 0; a covariate
 under selection keeps a positive weight from its polygenic score.
 
