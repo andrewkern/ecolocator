@@ -743,3 +743,91 @@ def test_load_model_of_submitted_network(tmp_path, example_data):
     assert (
         len(loaded.predict(str(matrix_path), str(tmp_path / "pred_samples.tsv"))) == 5
     )
+
+
+def _masked(sample_data_path, tmp_path, n=2):
+    sd = pd.read_csv(sample_data_path, sep="\t")
+    sd.loc[: n - 1, ["x", "y"]] = np.nan
+    path = tmp_path / "masked.tsv"
+    sd.to_csv(path, sep="\t", index=False)
+    return path
+
+
+def test_fit_location_route_and_weights(example_data, tmp_path):
+    """testing that fit() trains a location route and sets one non-negative weight per covariate"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+    )
+    assert model.location_route_ is not None
+    assert model.env_weights_.shape == (3,)
+    assert np.all(model.env_weights_ >= 0)
+    result = model.predict(
+        str(matrix_path), str(_masked(sample_data_path, tmp_path)), location_route=True
+    )
+    assert list(result.columns) == [
+        "sampleID",
+        "x",
+        "y",
+        "cov1",
+        "cov2",
+        "cov3",
+        "cov1_location",
+        "cov2_location",
+        "cov3_location",
+    ]
+    assert np.isfinite(result.drop(columns="sampleID").to_numpy()).all()
+
+
+def test_offset(example_data, tmp_path):
+    """testing that offset() gives one weighted distance per sample and site"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+    )
+    masked = str(_masked(sample_data_path, tmp_path))
+    sites = pd.DataFrame(
+        {"cov1": [0.2, 0.8], "cov2": [0.5, 0.1], "cov3": [0.3, 0.9]}, index=["a", "b"]
+    )
+    off = model.offset(str(matrix_path), masked, sites, weights=[1.0, 0.0, 0.0])
+    assert list(off.columns) == ["sampleID", "site", "offset"]
+    assert len(off) == 2 * len(sites)
+    pred = model.predict(str(matrix_path), masked).set_index("sampleID")
+    expected = np.abs(sites.loc["b", "cov1"] - pred.cov1) / model.sds_[0]
+    got = off[off.site == "b"].set_index("sampleID").offset.loc[pred.index]
+    np.testing.assert_allclose(got, expected, rtol=1e-5)
+    assert (model.offset(str(matrix_path), masked, sites).offset >= 0).all()
+
+
+def test_save_load_keeps_location_route(tmp_path, example_data):
+    """testing that a saved and loaded model keeps its location route and weights"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+    )
+    model.save(str(tmp_path / "m"))
+    loaded = EcoLocator.load(str(tmp_path / "m"))
+    np.testing.assert_allclose(loaded.env_weights_, model.env_weights_)
+    masked = str(_masked(sample_data_path, tmp_path))
+    a = model.predict(str(matrix_path), masked, location_route=True)
+    b = loaded.predict(str(matrix_path), masked, location_route=True)
+    np.testing.assert_allclose(
+        a.drop(columns="sampleID").to_numpy(),
+        b.drop(columns="sampleID").to_numpy(),
+        rtol=1e-5,
+    )

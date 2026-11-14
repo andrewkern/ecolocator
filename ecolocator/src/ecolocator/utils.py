@@ -278,3 +278,54 @@ def back_transform_env(
         if t == "log":
             result[:, i] = np.exp(result[:, i])
     return result
+
+
+def transform_env(
+    values: np.ndarray,
+    means: np.ndarray,
+    sds: np.ndarray,
+    transforms: list,
+) -> np.ndarray:
+    """Normalize covariate values (n x covariates) as normalize_locs does:
+    the inverse of back_transform_env."""
+    result = np.array(values, dtype=float, ndmin=2)
+    for i, t in enumerate(transforms):
+        if t == "log":
+            result[:, i] = np.log(result[:, i])
+    return (result - means) / sds
+
+
+def env_weights(
+    observed: np.ndarray,
+    predicted: np.ndarray,
+    location_route: np.ndarray,
+) -> np.ndarray:
+    """How much of each covariate a prediction explains beyond its location
+    route: R^2(c ~ route + prediction) - R^2(c ~ route), by least squares
+    with an intercept, floored at 0. Arrays are samples x covariates
+    (observed values, EcoLocator's predictions, and its location-route
+    predictions) for samples the model did not train on.
+
+    A covariate that varies with location but not with the genotype beyond
+    location gets a weight near 0; one under selection keeps a positive
+    weight, from the polygenic score."""
+    observed, predicted, location_route = (
+        np.array(a, dtype=float, ndmin=2).reshape(len(a), -1)
+        for a in (observed, predicted, location_route)
+    )
+
+    def r2(y, *xs):
+        x = np.column_stack([np.ones(len(y)), *xs])
+        fitted = x @ np.linalg.lstsq(x, y, rcond=None)[0]
+        return 1 - np.sum((y - fitted) ** 2) / np.sum((y - y.mean()) ** 2)
+
+    return np.array(
+        [
+            max(
+                0.0,
+                r2(observed[:, j], location_route[:, j], predicted[:, j])
+                - r2(observed[:, j], location_route[:, j]),
+            )
+            for j in range(observed.shape[1])
+        ]
+    )

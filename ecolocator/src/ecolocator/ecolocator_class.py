@@ -11,8 +11,16 @@ from .utils import (
     filter_snps,
     replace_missing_data,
     back_transform_env,
+    transform_env,
+    env_weights,
 )
-from .network import build_pgs_network, train_network, euclid_loss
+from .network import (
+    build_pgs_network,
+    build_location_route,
+    build_callbacks,
+    train_network,
+    euclid_loss,
+)
 
 # Network settings, saved with a model and passed to build_pgs_network
 # (except score_l2, which fit() resolves to one penalty first).
@@ -39,6 +47,13 @@ class EcoLocator:
     correction head that also reads the predicted location. ``score_l2`` is
     the L2 penalty of the scores: a number fixes it; a sequence is searched,
     each fit keeping the penalty with the lowest covariate validation loss.
+
+    After the network, fit() trains a location route
+    (network.build_location_route): for each covariate, a small head that
+    reads only the predicted location. On the validation samples,
+    ``env_weights_`` holds how much of each covariate the network predicts
+    beyond its location route (utils.env_weights). offset() uses these
+    weights for a genomic offset over several covariates.
     """
 
     def __init__(
@@ -92,6 +107,17 @@ class EcoLocator:
         obj.num_covs_ = len(obj.cov_names_)
         obj.transforms_ = params["transforms"]
         obj.score_l2_ = params.get("score_l2_fitted")
+        weights = params.get("env_weights")
+        obj.env_weights_ = None if weights is None else np.array(weights)
+
+        # Models saved without a location route predict as before;
+        # predict(location_route=True) and offset() need one.
+        route_path = os.path.join(path, "location_route.keras")
+        obj.location_route_ = (
+            tf.keras.models.load_model(route_path)
+            if os.path.exists(route_path)
+            else None
+        )
 
         obj.model_ = tf.keras.models.load_model(
             os.path.join(path, "model.keras"),
@@ -103,6 +129,8 @@ class EcoLocator:
     def save(self, path: str) -> None:
         os.makedirs(path, exist_ok=True)
         self.model_.save(os.path.join(path, "model.keras"))
+        if getattr(self, "location_route_", None) is not None:
+            self.location_route_.save(os.path.join(path, "location_route.keras"))
         np.savez(
             os.path.join(path, "arrays.npz"),
             meanlong=self.meanlong_,
@@ -120,6 +148,11 @@ class EcoLocator:
             "transforms": self.transforms_,
             "cov_transforms": self.cov_transforms,
             "score_l2_fitted": self.score_l2_,
+            "env_weights": (
+                None
+                if getattr(self, "env_weights_", None) is None
+                else [float(w) for w in self.env_weights_]
+            ),
             **{k: getattr(self, k) for k in HYPERPARAMETERS},
         }
         with open(os.path.join(path, "params.json"), "w") as f:
@@ -196,7 +229,66 @@ class EcoLocator:
             verbose,
         )
         self.score_l2_ = min(self.score_l2_losses_, key=self.score_l2_losses_.get)
+        self.location_route_, self.env_weights_ = None, None
+        if num_covs > 0:
+            self.location_route_, self.env_weights_ = self._fit_location_route(
+                traingen,
+                testgen,
+                trainlocs,
+                testlocs,
+                seed,
+                max_epochs,
+                batch_size,
+                patience,
+            )
         return self
+
+    def _fit_location_route(
+        self,
+        traingen,
+        testgen,
+        trainlocs,
+        testlocs,
+        seed,
+        max_epochs,
+        batch_size,
+        patience,
+        draws: int = 5,
+    ):
+        """Train the location route on the fitted network's predicted
+        locations, and compute env_weights_ on the validation samples.
+
+        The route's training inputs are the predicted locations of the
+        training samples with dropout active, ``draws`` times: the network
+        predicts training samples more closely than new samples, and
+        dropout gives inputs with error, as the correction heads see them
+        in training. Validation samples (predicted without dropout) stop the
+        training early. Returns the route and the weights."""
+        if seed is not None:
+            tf.keras.utils.set_random_seed(seed)
+        noisy = [
+            np.concatenate(
+                [
+                    self.model_(traingen[i : i + 1024], training=True)[0].numpy()
+                    for i in range(0, len(traingen), 1024)
+                ]
+            )
+            for _ in range(draws)
+        ]
+        val_loc, val_env = self.model_.predict(testgen, verbose=0)
+        route = build_location_route(self.num_covs_, self.head_width, self.weight_decay)
+        route.fit(
+            np.concatenate(noisy),
+            np.tile(trainlocs[1], (draws, 1)),
+            validation_data=(val_loc, testlocs[1]),
+            epochs=max_epochs,
+            batch_size=batch_size,
+            shuffle=True,
+            verbose=0,
+            callbacks=build_callbacks(patience=patience, verbose=0),
+        )
+        val_route = route.predict(val_loc, verbose=0)
+        return route, env_weights(testlocs[1], val_env, val_route)
 
     def _fit_network(
         self,
@@ -256,7 +348,13 @@ class EcoLocator:
         self,
         genotype_path: str,
         sample_data_path: str,
+        location_route: bool = False,
     ) -> pd.DataFrame:
+        """Predict location and covariates of the samples with missing x/y.
+
+        With ``location_route``, also each covariate's location-route
+        prediction (column <covariate>_location): what the predicted
+        location alone tells about it."""
         genotypes, samples, _ = self._get_genotypes(genotype_path)
         _, locs = sort_samples(samples, sample_data_path)
 
@@ -267,6 +365,17 @@ class EcoLocator:
         predgen = np.transpose(ac[:, pred])
 
         prediction = self.model_.predict(predgen)
+        if location_route:
+            if self.num_covs_ == 0 or getattr(self, "location_route_", None) is None:
+                raise ValueError("this model has no location route")
+            route = back_transform_env(
+                self.location_route_.predict(prediction[0], verbose=0).reshape(
+                    len(pred), -1
+                ),
+                self.means_,
+                self.sds_,
+                self.transforms_,
+            )
         if self.num_covs_ > 0:
             pred_longlat = prediction[0] * np.array(
                 [self.sdlong_, self.sdlat_]
@@ -278,6 +387,9 @@ class EcoLocator:
             result = pd.DataFrame(pred_longlat, columns=["x", "y"])
             cov_cols = pd.DataFrame(pred_env, columns=self.cov_names_)
             result = pd.concat([result, cov_cols], axis=1)
+            if location_route:
+                for j, name in enumerate(self.cov_names_):
+                    result[f"{name}_location"] = route[:, j]
             result.insert(0, "sampleID", samples[pred])
             return result
         else:
@@ -288,6 +400,54 @@ class EcoLocator:
             result = pd.DataFrame(pred_longlat, columns=["x", "y"])
             result.insert(0, "sampleID", samples[pred])
             return result
+
+    def offset(
+        self,
+        genotype_path: str,
+        sample_data_path: str,
+        sites: pd.DataFrame,
+        weights: np.ndarray = None,
+    ) -> pd.DataFrame:
+        """Genomic offset of each sample with missing x/y to each site.
+
+        ``sites`` has one row per site (for example a common garden or a
+        future climate) and a column for every covariate; its index names
+        the sites. The offset of sample i to site g is the weighted
+        Euclidean distance between the covariates EcoLocator predicts for i
+        and those of g, in normalized units:
+        sqrt(sum_c w_c (z_gc - zhat_ic)^2). ``weights`` defaults to
+        ``env_weights_``, so covariates that the genotypes predict only
+        through location count little.
+
+        Returns a DataFrame: sampleID, site, offset."""
+        if self.num_covs_ == 0:
+            raise ValueError("offset() needs a model with covariates")
+        if weights is None:
+            if getattr(self, "env_weights_", None) is None:
+                raise ValueError("this model has no env_weights_; give weights")
+            weights = self.env_weights_
+        weights = np.asarray(weights, dtype=float)
+        predicted = self.predict(genotype_path, sample_data_path)
+        z_pred = transform_env(
+            predicted[self.cov_names_].to_numpy(),
+            self.means_,
+            self.sds_,
+            self.transforms_,
+        )
+        z_site = transform_env(
+            sites[self.cov_names_].to_numpy(), self.means_, self.sds_, self.transforms_
+        )
+        rows = [
+            pd.DataFrame(
+                {
+                    "sampleID": predicted.sampleID,
+                    "site": site,
+                    "offset": np.sqrt(((z - z_pred) ** 2) @ weights),
+                }
+            )
+            for site, z in zip(sites.index, z_site)
+        ]
+        return pd.concat(rows, ignore_index=True)
 
     def fit_predict_loo(
         self,

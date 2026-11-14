@@ -468,3 +468,31 @@ def test_back_transform_env_output_shape():
     sds = np.array([1.0, 1.0, 1.0])
     result = back_transform_env(z, means, sds, ["none", "log", "none"])
     assert result.shape == z.shape
+
+
+def test_env_weights():
+    """testing that a covariate predicted only through location gets weight near 0, and one with genotype signal beyond location a positive weight"""
+    from ecolocator.utils import env_weights
+
+    rng = np.random.default_rng(0)
+    n = 2000
+    loc = rng.normal(size=n)
+    genetic = rng.normal(size=n)
+    structured = loc + 0.5 * rng.normal(size=n)
+    selected = loc + genetic + 0.5 * rng.normal(size=n)
+    observed = np.column_stack([structured, selected])
+    route = np.column_stack([loc, loc])
+    predicted = np.column_stack([loc, loc + genetic])
+    w = env_weights(observed, predicted, route)
+    assert w[0] < 0.01
+    assert w[1] > 0.3
+
+
+def test_transform_env_inverts_back_transform():
+    """testing that transform_env inverts back_transform_env, with a log transform"""
+    from ecolocator.utils import back_transform_env, transform_env
+
+    z = np.array([[0.5, -1.0], [1.2, 0.3]])
+    means, sds = np.array([1.0, 2.0]), np.array([0.5, 0.25])
+    values = back_transform_env(z.copy(), means, sds, ["none", "log"])
+    np.testing.assert_allclose(transform_env(values, means, sds, ["none", "log"]), z)

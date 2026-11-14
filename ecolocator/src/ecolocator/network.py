@@ -113,6 +113,36 @@ def build_pgs_network(
     return model
 
 
+def build_location_route(
+    num_covs: int,
+    head_width: int = 16,
+    weight_decay: float = 2e-4,
+) -> tf.keras.Model:
+    """The location route of the covariates: for each covariate j, a head
+    g_j (``head_width`` ELU units, then one linear unit) that reads only a
+    predicted location (x, y; normalized). It predicts what location alone
+    tells about each covariate. EcoLocator.fit trains it after the network,
+    so it does not change the network's fit."""
+    location = tf.keras.Input(shape=(2,), name="location")
+    reg = tf.keras.regularizers.l2(weight_decay)
+    outputs = []
+    for j in range(num_covs):
+        hidden = tf.keras.layers.Dense(
+            head_width, activation="elu", kernel_regularizer=reg, name=f"route_head_{j}"
+        )(location)
+        outputs.append(
+            tf.keras.layers.Dense(1, kernel_regularizer=reg, name=f"route_{j}")(hidden)
+        )
+    output = (
+        outputs[0]
+        if num_covs == 1
+        else tf.keras.layers.Concatenate(name="routes")(outputs)
+    )
+    model = tf.keras.Model(inputs=location, outputs=output)
+    model.compile(optimizer="Adam", loss="mse")
+    return model
+
+
 def build_network(
     n_snps: int,
     num_covs: int,

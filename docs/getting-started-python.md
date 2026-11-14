@@ -27,7 +27,8 @@ model.save("my_model")
 ```
 
 `save()` writes a directory containing `model.keras`, `arrays.npz`, and
-`params.json`.
+`params.json`, and, for a model with covariates, `location_route.keras`
+(see Genomic offset).
 
 ## Predict
 
@@ -41,6 +42,40 @@ predictions = model.predict(
 )
 print(predictions)  # DataFrame: sampleID, x, y, <covariates...>
 ```
+
+## Genomic offset
+
+After the network, `fit()` trains a location route: for each covariate, a
+small head that predicts it from the predicted location alone. On the
+validation samples, `model.env_weights_` holds how much of each covariate
+the network predicts beyond its location route, R²(c ~ route + prediction)
+− R²(c ~ route), floored at 0. A covariate that varies with location but
+not with the genotypes beyond location gets a weight near 0; a covariate
+under selection keeps a positive weight from its polygenic score.
+
+`offset()` gives the genomic offset of each sample to each site (for
+example a common garden or a future climate): the Euclidean distance
+between the covariates EcoLocator predicts for the sample and those of the
+site, in normalized units, with each covariate weighted by
+`env_weights_` (or by `weights`).
+
+```python
+import pandas as pd
+
+# One row per site, a column for every covariate of the model.
+sites = pd.DataFrame(
+    {"cov1": [0.2, 0.8], "cov2": [0.5, 0.1], "cov3": [0.3, 0.9]},
+    index=["garden_a", "garden_b"],
+)
+offsets = model.offset(
+    genotype_path="./data/test_genotypes.vcf.gz",
+    sample_data_path="./data/test_sample_data_cov.txt",
+    sites=sites,
+)  # DataFrame: sampleID, site, offset
+```
+
+`predict(..., location_route=True)` adds the location-route prediction of
+each covariate (columns `<covariate>_location`).
 
 
 ## Leave-one-out
