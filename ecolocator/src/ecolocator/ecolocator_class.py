@@ -17,7 +17,6 @@ from .utils import (
 from .network import (
     build_pgs_network,
     build_location_route,
-    build_callbacks,
     train_network,
     euclid_loss,
 )
@@ -238,7 +237,6 @@ class EcoLocator:
                 testlocs,
                 seed,
                 max_epochs,
-                batch_size,
                 patience,
             )
         return self
@@ -251,7 +249,6 @@ class EcoLocator:
         testlocs,
         seed,
         max_epochs,
-        batch_size,
         patience,
         draws: int = 5,
     ):
@@ -277,15 +274,25 @@ class EcoLocator:
         ]
         val_loc, val_env = self.model_.predict(testgen, verbose=0)
         route = build_location_route(self.num_covs_, self.head_width, self.weight_decay)
+        # The route has a few hundred weights, so Keras's cost per step
+        # dominates its training: large batches, and early stopping that
+        # needs a real improvement (min_delta), keep it to seconds.
         route.fit(
             np.concatenate(noisy),
             np.tile(trainlocs[1], (draws, 1)),
             validation_data=(val_loc, testlocs[1]),
-            epochs=max_epochs,
-            batch_size=batch_size,
+            epochs=min(max_epochs, 1000),
+            batch_size=256,
             shuffle=True,
             verbose=0,
-            callbacks=build_callbacks(patience=patience, verbose=0),
+            callbacks=[
+                tf.keras.callbacks.EarlyStopping(
+                    monitor="val_loss",
+                    min_delta=1e-4,
+                    patience=min(patience, 20),
+                    restore_best_weights=True,
+                )
+            ],
         )
         val_route = route.predict(val_loc, verbose=0)
         return route, env_weights(testlocs[1], val_env, val_route)
