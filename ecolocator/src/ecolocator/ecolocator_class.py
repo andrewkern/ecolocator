@@ -13,6 +13,7 @@ from .utils import (
     back_transform_env,
     transform_env,
     env_weights,
+    env_errors,
 )
 from .network import (
     build_pgs_network,
@@ -51,9 +52,11 @@ class EcoLocator:
     (network.build_location_route): for each covariate, a small head that
     reads only the predicted location. ``env_weights_`` holds how much of
     each covariate the network predicts beyond its location route
-    (utils.env_weights), from cross-fitted predictions of all samples with
-    known coordinates (``weight_folds`` in fit()). offset() uses these
-    weights for a genomic offset over several covariates.
+    (utils.env_weights), and ``env_mse_`` the mean squared error of each
+    covariate's prediction (utils.env_errors), both from cross-fitted
+    predictions of all samples with known coordinates (``weight_folds`` in
+    fit()). offset() weights each covariate by env_weights_ / env_mse_ for a
+    genomic offset over several covariates.
     """
 
     def __init__(
@@ -109,6 +112,8 @@ class EcoLocator:
         obj.score_l2_ = params.get("score_l2_fitted")
         weights = params.get("env_weights")
         obj.env_weights_ = None if weights is None else np.array(weights)
+        errors = params.get("env_mse")
+        obj.env_mse_ = None if errors is None else np.array(errors)
 
         # Models saved without a location route predict as before;
         # predict(location_route=True) and offset() need one.
@@ -152,6 +157,11 @@ class EcoLocator:
                 None
                 if getattr(self, "env_weights_", None) is None
                 else [float(w) for w in self.env_weights_]
+            ),
+            "env_mse": (
+                None
+                if getattr(self, "env_mse_", None) is None
+                else [float(e) for e in self.env_mse_]
             ),
             **{k: getattr(self, k) for k in HYPERPARAMETERS},
         }
@@ -241,7 +251,7 @@ class EcoLocator:
             verbose,
         )
         self.score_l2_ = min(self.score_l2_losses_, key=self.score_l2_losses_.get)
-        self.location_route_, self.env_weights_ = None, None
+        self.location_route_, self.env_weights_, self.env_mse_ = None, None, None
         if num_covs > 0:
             self.location_route_ = self._fit_location_route(
                 self.model_,
@@ -254,7 +264,7 @@ class EcoLocator:
                 patience,
             )
             if weight_folds >= 2:
-                self.env_weights_ = self._crossfit_weights(
+                self.env_weights_, self.env_mse_ = self._crossfit_weights(
                     ac,
                     np.concatenate([train, test]),
                     locs,
@@ -274,6 +284,7 @@ class EcoLocator:
                     val_env,
                     self.location_route_.predict(val_loc, verbose=0),
                 )
+                self.env_mse_ = env_errors(testlocs[1], val_env)
         return self
 
     def _crossfit_weights(
@@ -290,10 +301,11 @@ class EcoLocator:
         patience,
         verbose,
     ):
-        """Covariate weights from out-of-fold predictions of the known
-        samples (indices ``known`` into ac and the normalized locs). Each
-        fold's network uses the penalty of the main fit. Returns None (with
-        a warning) when a fold would leave fewer than 2 samples to fit."""
+        """Covariate weights and prediction errors from out-of-fold
+        predictions of the known samples (indices ``known`` into ac and the
+        normalized locs). Each fold's network uses the penalty of the main
+        fit. Returns (None, None) (with a warning) when a fold would leave
+        fewer than 2 samples to fit."""
         folds = min(folds, len(known))
         smallest_rest = len(known) - int(np.ceil(len(known) / folds))
         if smallest_rest - max(1, round((1 - train_split) * smallest_rest)) < 2:
@@ -301,7 +313,7 @@ class EcoLocator:
                 f"Too few samples ({len(known)}) for {folds}-fold covariate weights; "
                 "using the validation samples of the main fit."
             )
-            return None
+            return None, None
         order = rng.permutation(known)
         fold_of = np.arange(len(order)) % folds
         observed, predicted, routes = [], [], []
@@ -351,8 +363,10 @@ class EcoLocator:
             routes.append(
                 np.reshape(route.predict(held_loc, verbose=0), (len(held), -1))
             )
-        return env_weights(
-            np.concatenate(observed), np.concatenate(predicted), np.concatenate(routes)
+        observed, predicted = np.concatenate(observed), np.concatenate(predicted)
+        return (
+            env_weights(observed, predicted, np.concatenate(routes)),
+            env_errors(observed, predicted),
         )
 
     def _fit_location_route(
@@ -532,6 +546,7 @@ class EcoLocator:
         sample_data_path: str,
         sites: pd.DataFrame,
         weights: np.ndarray = None,
+        scale_by_error: bool = True,
     ) -> pd.DataFrame:
         """Genomic offset of each sample with missing x/y to each site.
 
@@ -540,9 +555,13 @@ class EcoLocator:
         the sites. The offset of sample i to site g is the weighted
         Euclidean distance between the covariates EcoLocator predicts for i
         and those of g, in normalized units:
-        sqrt(sum_c w_c (z_gc - zhat_ic)^2). ``weights`` defaults to
-        ``env_weights_``, so covariates that the genotypes predict only
-        through location count little.
+        sqrt(sum_c (w_c / e_c) (z_gc - zhat_ic)^2).
+
+        ``weights`` (w_c) defaults to ``env_weights_``, so covariates that
+        the genotypes predict only through location count little. e_c is
+        ``env_mse_``, the covariate's cross-fitted prediction error, so
+        covariates the network predicts poorly count less; with
+        ``scale_by_error=False``, or for a model without env_mse_, e_c = 1.
 
         Returns a DataFrame: sampleID, site, offset."""
         if self.num_covs_ == 0:
@@ -552,6 +571,9 @@ class EcoLocator:
                 raise ValueError("this model has no env_weights_; give weights")
             weights = self.env_weights_
         weights = np.asarray(weights, dtype=float)
+        errors = getattr(self, "env_mse_", None)
+        if scale_by_error and errors is not None:
+            weights = weights / np.maximum(np.asarray(errors, dtype=float), 1e-12)
         predicted = self.predict(genotype_path, sample_data_path)
         z_pred = transform_env(
             predicted[self.cov_names_].to_numpy(),

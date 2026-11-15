@@ -57,11 +57,17 @@ only, which is cheaper but noisy when there are few of them. A covariate that va
 not with the genotypes beyond location gets a weight near 0; a covariate
 under selection keeps a positive weight from its polygenic score.
 
+`model.env_mse_` holds each covariate's cross-fitted prediction error
+(mean squared error in normalized units), from the same folds.
+
 `offset()` gives the genomic offset of each sample to each site (for
 example a common garden or a future climate): the Euclidean distance
 between the covariates EcoLocator predicts for the sample and those of the
 site, in normalized units, with each covariate weighted by
-`env_weights_` (or by `weights`).
+`env_weights_ / env_mse_`. A covariate counts more when the genotype
+predicts it beyond location and when the network predicts it well.
+`weights=` replaces `env_weights_`; `scale_by_error=False` drops the
+division by `env_mse_`.
 
 ```python
 import pandas as pd

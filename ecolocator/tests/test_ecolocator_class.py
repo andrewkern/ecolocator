@@ -767,6 +767,8 @@ def test_fit_location_route_and_weights(example_data, tmp_path):
     assert model.location_route_ is not None
     assert model.env_weights_.shape == (3,)
     assert np.all(model.env_weights_ >= 0)
+    assert model.env_mse_.shape == (3,)
+    assert np.all(model.env_mse_ > 0)
     result = model.predict(
         str(matrix_path), str(_masked(sample_data_path, tmp_path)), location_route=True
     )
@@ -799,7 +801,9 @@ def test_offset(example_data, tmp_path):
     sites = pd.DataFrame(
         {"cov1": [0.2, 0.8], "cov2": [0.5, 0.1], "cov3": [0.3, 0.9]}, index=["a", "b"]
     )
-    off = model.offset(str(matrix_path), masked, sites, weights=[1.0, 0.0, 0.0])
+    off = model.offset(
+        str(matrix_path), masked, sites, weights=[1.0, 0.0, 0.0], scale_by_error=False
+    )
     assert list(off.columns) == ["sampleID", "site", "offset"]
     assert len(off) == 2 * len(sites)
     pred = model.predict(str(matrix_path), masked).set_index("sampleID")
@@ -807,6 +811,10 @@ def test_offset(example_data, tmp_path):
     got = off[off.site == "b"].set_index("sampleID").offset.loc[pred.index]
     np.testing.assert_allclose(got, expected, rtol=1e-5)
     assert (model.offset(str(matrix_path), masked, sites).offset >= 0).all()
+    # By default each weight is divided by the covariate's prediction error.
+    scaled = model.offset(str(matrix_path), masked, sites, weights=[1.0, 0.0, 0.0])
+    got = scaled[scaled.site == "b"].set_index("sampleID").offset.loc[pred.index]
+    np.testing.assert_allclose(got, expected / np.sqrt(model.env_mse_[0]), rtol=1e-5)
 
 
 def test_save_load_keeps_location_route(tmp_path, example_data):
@@ -823,6 +831,7 @@ def test_save_load_keeps_location_route(tmp_path, example_data):
     model.save(str(tmp_path / "m"))
     loaded = EcoLocator.load(str(tmp_path / "m"))
     np.testing.assert_allclose(loaded.env_weights_, model.env_weights_)
+    np.testing.assert_allclose(loaded.env_mse_, model.env_mse_)
     masked = str(_masked(sample_data_path, tmp_path))
     a = model.predict(str(matrix_path), masked, location_route=True)
     b = loaded.predict(str(matrix_path), masked, location_route=True)

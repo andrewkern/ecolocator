@@ -496,3 +496,12 @@ def test_transform_env_inverts_back_transform():
     means, sds = np.array([1.0, 2.0]), np.array([0.5, 0.25])
     values = back_transform_env(z.copy(), means, sds, ["none", "log"])
     np.testing.assert_allclose(transform_env(values, means, sds, ["none", "log"]), z)
+
+
+def test_env_errors():
+    """testing that env_errors gives each covariate's mean squared prediction error"""
+    from ecolocator.utils import env_errors
+
+    observed = np.array([[0.0, 1.0], [2.0, 3.0]])
+    predicted = np.array([[1.0, 1.0], [2.0, 1.0]])
+    np.testing.assert_allclose(env_errors(observed, predicted), [0.5, 2.0])

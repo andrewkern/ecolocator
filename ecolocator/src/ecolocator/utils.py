@@ -331,3 +331,15 @@ def env_weights(
             for j in range(observed.shape[1])
         ]
     )
+
+
+def env_errors(observed: np.ndarray, predicted: np.ndarray) -> np.ndarray:
+    """Mean squared error of each covariate's prediction (samples x
+    covariates, normalized units), for samples the model did not train on.
+    offset() divides each covariate's weight by it, so that covariates the
+    network predicts poorly count less."""
+    observed, predicted = (
+        np.array(a, dtype=float, ndmin=2).reshape(len(a), -1)
+        for a in (observed, predicted)
+    )
+    return np.mean((observed - predicted) ** 2, axis=0)
