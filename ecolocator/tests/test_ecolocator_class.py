@@ -868,3 +868,22 @@ def test_crossfit_weights_leave_the_model_unchanged(example_data_30, tmp_path, c
         assert np.all(model.env_weights_ >= 0)
     assert "Too few samples" not in caplog.text
     np.testing.assert_allclose(preds[0].to_numpy(), preds[1].to_numpy())
+
+
+def test_offset_with_masked_covariates(example_data_30, tmp_path):
+    """testing that samples to predict may have missing covariates as well as missing x/y"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    sd = pd.read_csv(sample_data_path, sep="\t")
+    sd.loc[:4, ["x", "y", "cov1", "cov2", "cov3"]] = np.nan
+    masked = tmp_path / "masked_all.tsv"
+    sd.to_csv(masked, sep="\t", index=False)
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path), str(masked), max_epochs=3, patience=2, train_split=0.6, seed=3
+    )
+    assert np.all(np.isfinite(model.env_weights_))
+    sites = pd.DataFrame({"cov1": [0.2], "cov2": [0.5], "cov3": [0.3]}, index=["a"])
+    off = model.offset(str(matrix_path), str(masked), sites)
+    assert len(off) == 5
+    assert np.isfinite(off.offset).all()
+    pred = model.predict(str(matrix_path), str(masked), location_route=True)
+    assert np.isfinite(pred.drop(columns="sampleID").to_numpy()).all()
