@@ -103,7 +103,7 @@ class EcoLocator:
     (utils.env_weights), and ``env_mse_`` the mean squared error of each
     covariate's prediction (utils.env_errors), both from cross-fitted
     predictions of all samples with known coordinates (``weight_folds`` in
-    fit()). offset() weights each covariate by env_weights_ / env_mse_ for a
+    fit()). offset() weights each covariate by ``env_weights_`` / ``env_mse_`` for a
     genomic offset over several covariates.
     """
 
@@ -616,8 +616,8 @@ class EcoLocator:
         return output[0], np.reshape(output[1], (len(rows), -1))
 
     def _offset_weights(self, weights=None, scale_by_error=True) -> np.ndarray:
-        """Covariate weights of offset(): ``weights`` (default env_weights_),
-        divided by env_mse_ when scale_by_error and the model has it."""
+        """Covariate weights of offset(): ``weights`` (default ``env_weights_``),
+        divided by ``env_mse_`` when scale_by_error and the model has it."""
         if weights is None:
             if self.env_weights_ is None:
                 raise ValueError("this model has no env_weights_; give weights")
@@ -631,8 +631,8 @@ class EcoLocator:
 
     @property
     def offset_weights_(self) -> np.ndarray:
-        """The weights offset() uses by default: env_weights_ / env_mse_
-        (env_weights_ alone for a model without env_mse_)."""
+        """The weights offset() uses by default: ``env_weights_`` / ``env_mse_``
+        (``env_weights_`` alone for a model without ``env_mse_``)."""
         return None if self.env_weights_ is None else self._offset_weights()
 
     @property
@@ -671,7 +671,7 @@ class EcoLocator:
 
         Every prediction comes from a model that did not see the sample:
         samples that fit() trained on get their out-of-fold prediction from
-        the weight folds (crossfit_predictions_); all other samples (missing
+        the weight folds (``crossfit_predictions_``); all other samples (missing
         x/y, or not in the training data) get the fitted model's
         prediction. Training samples therefore need a fit with
         weight_folds >= 2.
@@ -680,7 +680,7 @@ class EcoLocator:
         the genotypes predict only through location count little. e_c is
         ``env_mse_``, the covariate's cross-fitted prediction error, so
         covariates the network predicts poorly count less; with
-        ``scale_by_error=False``, or for a model without env_mse_, e_c = 1.
+        ``scale_by_error=False``, or for a model without ``env_mse_``, e_c = 1.
 
         Returns a DataFrame: sampleID, site, offset."""
         if self.num_covs_ == 0:
