@@ -176,15 +176,28 @@ def filter_snps(
     logging.info("filtering SNPs...")
     kept_indices = np.arange(genotypes.shape[0])
     allele_counts = genotypes.count_alleles()
-    biallelic_mask = allele_counts.is_biallelic()
+    # The encoding (replace_missing_data) counts copies of allele 1, so keep
+    # biallelic sites where allele 1 is one of the two alleles; at a site
+    # with alleles 0 and 2 that count would be constant.
+    biallelic_mask = allele_counts.is_biallelic() & (allele_counts[:, 1] > 0)
     genotypes = genotypes[biallelic_mask, :, :]
     kept_indices = kept_indices[biallelic_mask]
     if min_mac != 1:
-        derived_counts = genotypes.count_alleles()[:, 1]
-        mac_mask = derived_counts >= min_mac
+        # Minor-allele count: the rarer of the two alleles at each site,
+        # whether that is allele 1 or the other one (allele 0, the reference,
+        # or allele 2 at a multi-allelic record): total called alleles minus
+        # the count of the most common allele.
+        counts = allele_counts[biallelic_mask]
+        minor_counts = counts.sum(axis=1) - counts.max(axis=1)
+        mac_mask = minor_counts >= min_mac
         genotypes = genotypes[mac_mask, :, :]
         kept_indices = kept_indices[mac_mask]
     if max_snps is not None:
+        if max_snps > len(genotypes):
+            raise ValueError(
+                f"max_snps={max_snps}, but only {len(genotypes)} SNPs pass the "
+                "biallelic and minor-allele-count filters"
+            )
         if rng is None:
             rng = np.random.default_rng()
         selected = rng.choice(len(genotypes), max_snps, replace=False)
