@@ -10,5 +10,6 @@ The public Python API. Pages below are generated from the package docstrings.
    ecolocator.ecolocator_class
    ecolocator.utils
    ecolocator.network
+   ecolocator.settings
    ecolocator.cli
 ```
