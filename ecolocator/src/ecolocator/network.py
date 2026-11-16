@@ -2,6 +2,8 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import backend as K
 
+from .settings import NETWORK_DEFAULTS as D
+
 
 @tf.keras.utils.register_keras_serializable(name="euclid_loss")
 def euclid_loss(y_true, y_pred):
@@ -23,14 +25,14 @@ def build_pgs_network(
     geno_mean: np.ndarray,
     geno_sd: np.ndarray,
     score_l2: float,
-    nlayers: int = 4,
-    width: int = 128,
-    dropout_prop: float = 0.25,
-    input_dropout: float = 0.1,
-    weight_decay: float = 2e-4,
-    head_width: int = 16,
-    loc_weight: float = 1.0,
-    env_weight: float = 1.0,
+    nlayers: int = D["nlayers"],
+    width: int = D["width"],
+    dropout_prop: float = D["dropout_prop"],
+    input_dropout: float = D["input_dropout"],
+    weight_decay: float = D["weight_decay"],
+    head_width: int = D["head_width"],
+    loc_weight: float = D["loc_weight"],
+    env_weight: float = D["env_weight"],
 ) -> tf.keras.Model:
     """The EcoLocator network.
 
@@ -54,9 +56,12 @@ def build_pgs_network(
     covariate includes the path through the predicted location.
 
     The penalties (``score_l2``, and ``weight_decay`` on the trunk and the
-    heads) are relative to the unweighted losses: each is multiplied by the
-    loss weight of its output, so the loss weights set only the balance
-    between location and covariates.
+    heads) are multiplied by the loss weight of their output, so the loss
+    weights set only the balance between location and covariates. The
+    covariate loss is the mean squared error over the K covariates, so each
+    covariate's error enters it with weight 1/K while its score keeps the
+    full penalty: relative to that covariate's own error, the penalty is
+    K * score_l2. The default penalty grid is tuned with this scaling.
     """
     loc_reg = tf.keras.regularizers.l2(weight_decay * loc_weight)
     env_reg = tf.keras.regularizers.l2(weight_decay * env_weight)
@@ -83,6 +88,9 @@ def build_pgs_network(
 
     location = StopGradient(name="stop_location")(loc_output)
     covariates = []
+    # TODO: consider dividing the score penalty by num_covs, so that
+    # score_l2 means the same penalty per covariate for any number of
+    # covariates (see the docstring); the default grid would need retuning.
     for j in range(num_covs):
         score = tf.keras.layers.Dense(
             1,

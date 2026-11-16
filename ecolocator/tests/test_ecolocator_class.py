@@ -737,9 +737,55 @@ def test_load_model_of_dense_network(tmp_path, example_data):
     (tmp_path / "m" / "params.json").write_text(json.dumps(old))
     loaded = EcoLocator.load(str(tmp_path / "m"))
     assert loaded.score_l2_ is None
+    assert loaded.network_ == "dense"
+    with pytest.raises(ValueError, match="dense network"):
+        loaded.fit(str(matrix_path), str(sample_data_path), max_epochs=1, patience=1)
     sd = pd.read_csv(sample_data_path, sep="\t")
     sd.loc[:4, ["x", "y"]] = np.nan
     sd.to_csv(tmp_path / "pred_samples.tsv", sep="\t", index=False)
     assert (
         len(loaded.predict(str(matrix_path), str(tmp_path / "pred_samples.tsv"))) == 5
     )
+
+
+def test_fit_without_validation_samples_raises(example_data):
+    """testing that a train_split leaving no validation samples gives a clear error"""
+    _, _, matrix_path, sample_data_path = example_data
+    with pytest.raises(ValueError, match="no validation samples"):
+        EcoLocator(**SMALL).fit(
+            str(matrix_path),
+            str(sample_data_path),
+            max_epochs=1,
+            patience=1,
+            train_split=1.0,
+        )
+
+
+def test_invalid_score_l2_raises(example_data):
+    """testing that an empty or negative penalty grid gives a clear error"""
+    _, _, matrix_path, sample_data_path = example_data
+    for bad in ((), (-1.0,)):
+        with pytest.raises(ValueError, match="score_l2"):
+            EcoLocator(**{**SMALL, "score_l2": bad}).fit(
+                str(matrix_path),
+                str(sample_data_path),
+                max_epochs=1,
+                patience=1,
+                train_split=0.6,
+            )
+
+
+def test_save_numpy_score_l2(tmp_path, example_data):
+    """testing that a model with a NumPy penalty grid saves and loads"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**{**SMALL, "score_l2": np.array([20.0, 60.0])}).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=1,
+        patience=1,
+        train_split=0.6,
+    )
+    model.save(str(tmp_path / "m"))
+    loaded = EcoLocator.load(str(tmp_path / "m"))
+    assert list(loaded.score_l2) == [20.0, 60.0]
+    assert loaded.network_ == "pgs"

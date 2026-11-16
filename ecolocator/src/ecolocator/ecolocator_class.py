@@ -17,17 +17,24 @@ from .settings import NETWORK_DEFAULTS as D
 
 # Network settings, saved with a model and passed to build_pgs_network
 # (except score_l2, which fit() resolves to one penalty first).
-HYPERPARAMETERS = (
-    "nlayers",
-    "width",
-    "dropout_prop",
-    "input_dropout",
-    "weight_decay",
-    "head_width",
-    "score_l2",
-    "loc_weight",
-    "env_weight",
-)
+HYPERPARAMETERS = tuple(D)
+
+
+def _json_value(value):
+    """A setting as JSON can store it: sequences (also NumPy arrays) as lists
+    of floats, NumPy scalars as Python numbers."""
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [float(v) for v in value]
+    return value.item() if isinstance(value, np.generic) else value
+
+
+def _column_mean_sd(*blocks):
+    """Mean and SD of every column over the rows of all blocks together,
+    without copying the blocks into one array."""
+    n = sum(len(b) for b in blocks)
+    mean = sum(b.sum(axis=0, dtype=float) for b in blocks) / n
+    var = sum(np.square(b - mean).sum(axis=0) for b in blocks) / n
+    return mean, np.sqrt(var)
 
 
 class EcoLocator:
@@ -65,6 +72,9 @@ class EcoLocator:
         self.score_l2 = score_l2
         self.loc_weight = loc_weight
         self.env_weight = env_weight
+        # "pgs" (build_pgs_network); load() sets "dense" for models saved
+        # with network.build_network, which fit() does not refit.
+        self.network_ = "pgs"
 
     @classmethod
     def load(cls, path: str) -> "EcoLocator":
@@ -72,12 +82,14 @@ class EcoLocator:
             params = json.load(f)
 
         # Models saved with the dense network (network.build_network) have
-        # fewer settings; the missing ones keep their defaults. The saved
-        # model file predicts and explains as it was fitted.
+        # no "network" field and fewer settings; the missing ones keep their
+        # defaults. The saved model file predicts and explains as it was
+        # fitted; fit() refuses to refit such a model.
         obj = cls(
             cov_transforms=params["cov_transforms"],
             **{k: params[k] for k in HYPERPARAMETERS if k in params},
         )
+        obj.network_ = params.get("network", "dense")
 
         arrays = np.load(os.path.join(path, "arrays.npz"))
         obj.meanlong_ = arrays["meanlong"].item()
@@ -120,8 +132,9 @@ class EcoLocator:
             "num_covs": self.num_covs_,
             "transforms": self.transforms_,
             "cov_transforms": self.cov_transforms,
-            "score_l2_fitted": self.score_l2_,
-            **{k: getattr(self, k) for k in HYPERPARAMETERS},
+            "score_l2_fitted": _json_value(self.score_l2_),
+            "network": self.network_,
+            **{k: _json_value(getattr(self, k)) for k in HYPERPARAMETERS},
         }
         with open(os.path.join(path, "params.json"), "w") as f:
             json.dump(params, f)
@@ -139,6 +152,11 @@ class EcoLocator:
         seed: int = None,
         verbose: int = 1,
     ) -> "EcoLocator":
+        if self.network_ != "pgs":
+            raise ValueError(
+                "this model was saved with the dense network (build_network); "
+                "fit a new EcoLocator instead"
+            )
         rng = np.random.default_rng(seed)
 
         genotypes, samples, _ = self._get_genotypes(genotype_path)
@@ -221,11 +239,19 @@ class EcoLocator:
         from the same seed, and the fit with the lowest covariate validation
         loss (MSE) is kept. Returns that model, its history, its penalty,
         and each penalty's validation loss."""
-        known = np.concatenate([traingen, testgen])
-        geno_mean, geno_sd = known.mean(axis=0), known.std(axis=0)
+        if len(testgen) == 0:
+            raise ValueError(
+                "no validation samples: train_split leaves none, and early "
+                "stopping and the penalty search need them"
+            )
+        geno_mean, geno_sd = _column_mean_sd(traingen, testgen)
         penalties = (
             [0.0] if num_covs == 0 else [float(p) for p in np.atleast_1d(self.score_l2)]
         )
+        if not penalties or not all(np.isfinite(p) and p >= 0 for p in penalties):
+            raise ValueError(
+                f"score_l2 must be one or more finite numbers >= 0, not {self.score_l2!r}"
+            )
         settings = {k: getattr(self, k) for k in HYPERPARAMETERS if k != "score_l2"}
         best, losses = None, {}
         for penalty in penalties:
@@ -250,7 +276,10 @@ class EcoLocator:
             # loss; that epoch's covariate validation loss decides.
             h = history.history
             key = f"val_{model.output_names[1]}_loss" if num_covs > 0 else "val_loss"
-            losses[penalty] = float(h[key][int(np.argmin(h["val_loss"]))])
+            # A diverged fit (NaN loss) counts as the worst.
+            val_loss = np.nan_to_num(h["val_loss"], nan=np.inf)
+            loss = float(h[key][int(np.argmin(val_loss))])
+            losses[penalty] = loss if np.isfinite(loss) else np.inf
             if best is None or losses[penalty] < losses[best[2]]:
                 best = (model, history, penalty)
         return (*best, losses)
