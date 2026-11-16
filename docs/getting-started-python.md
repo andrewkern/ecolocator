@@ -53,9 +53,10 @@ model = EcoLocator(
 `fit()` then fits the network once per penalty and keeps the fit with the
 lowest covariate validation loss. The chosen penalty is `model.score_l2_`,
 and each penalty's validation loss is in `model.score_l2_losses_`. The
-covariate loss is the mean squared error over the K covariates, so with K
-covariates each score's penalty, relative to its covariate's own error, is
-K times `score_l2`; the default grid is tuned with this scaling.
+covariate loss is the mean squared error over the K covariates, so each
+covariate's error enters it with weight 1/K; each score's penalty is
+divided by K as well, so `score_l2` is the same penalty, relative to a
+covariate's own error, for any number of covariates.
 
 `fit()` holds out `1 - train_split` of the samples with known coordinates
 for validation (early stopping and the penalty choice), and raises an
