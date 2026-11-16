@@ -885,3 +885,26 @@ def test_attribute_no_covariates(no_covariate_data, tmp_path):
     )
     with pytest.raises(ValueError, match="no covariates"):
         model.attribute(str(matrix_path), str(_masked(sample_data_path, tmp_path)))
+
+
+def test_save_after_attribute(tmp_path, example_data):
+    """testing that a model saves, loads, and predicts the same after attribute()"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=2,
+        patience=1,
+        train_split=0.6,
+        min_mac=1,
+        seed=1,
+    )
+    masked = _masked(sample_data_path, tmp_path)
+    model.attribute(str(matrix_path), str(masked), n_samples=5)
+    model.save(str(tmp_path / "m"))
+    loaded = EcoLocator.load(str(tmp_path / "m"))
+    pd.testing.assert_frame_equal(
+        loaded.predict(str(matrix_path), str(masked)),
+        model.predict(str(matrix_path), str(masked)),
+        atol=1e-5,
+    )

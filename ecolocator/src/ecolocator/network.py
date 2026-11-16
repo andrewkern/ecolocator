@@ -173,6 +173,8 @@ def path_attributions(
     x and background are genotype rows (0/1/2 counts, as the model takes
     them). Returns (direct, location), each of shape (samples, SNPs,
     covariates), in the units of the model's covariate output."""
+    if len(model.outputs) < 2:
+        raise ValueError("the model has no covariate output to attribute")
     full, direct = _covariate_models(model)
     num_covs = full.output.shape[-1]
 
