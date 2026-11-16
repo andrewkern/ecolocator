@@ -21,6 +21,7 @@ from .network import (
     train_network,
     euclid_loss,
 )
+from .settings import NETWORK_DEFAULTS as D
 
 # Network settings, saved with a model and passed to build_pgs_network
 # (except score_l2, which fit() resolves to one penalty first).
@@ -62,15 +63,15 @@ class EcoLocator:
     def __init__(
         self,
         cov_transforms: list = None,
-        nlayers: int = 4,
-        width: int = 128,
-        dropout_prop: float = 0.25,
-        input_dropout: float = 0.1,
-        weight_decay: float = 2e-4,
-        head_width: int = 16,
-        score_l2: float | tuple = (20.0, 60.0, 200.0, 600.0),
-        loc_weight: float = 1.0,
-        env_weight: float = 1.0,
+        nlayers: int = D["nlayers"],
+        width: int = D["width"],
+        dropout_prop: float = D["dropout_prop"],
+        input_dropout: float = D["input_dropout"],
+        weight_decay: float = D["weight_decay"],
+        head_width: int = D["head_width"],
+        score_l2: float | tuple = D["score_l2"],
+        loc_weight: float = D["loc_weight"],
+        env_weight: float = D["env_weight"],
     ):
         self.cov_transforms = cov_transforms
         self.nlayers = nlayers
@@ -88,9 +89,9 @@ class EcoLocator:
         with open(os.path.join(path, "params.json")) as f:
             params = json.load(f)
 
-        # Models saved with the network of the submitted manuscript have
-        # fewer settings; the missing ones keep their defaults. They predict
-        # and explain as before.
+        # Models saved with the dense network (network.build_network) have
+        # fewer settings; the missing ones keep their defaults. The saved
+        # model file predicts and explains as it was fitted.
         obj = cls(
             cov_transforms=params["cov_transforms"],
             **{k: params[k] for k in HYPERPARAMETERS if k in params},
@@ -254,19 +255,20 @@ class EcoLocator:
         self.num_covs_ = num_covs
         self.seed_ = seed
         self.train_ids_ = np.asarray(samples[np.concatenate([train, test])], dtype=str)
-        self.model_, self.history_, self.score_l2_losses_ = self._fit_network(
-            traingen,
-            testgen,
-            trainlocs,
-            testlocs,
-            num_covs,
-            seed,
-            max_epochs,
-            batch_size,
-            patience,
-            verbose,
+        self.model_, self.history_, self.score_l2_, self.score_l2_losses_ = (
+            self._fit_network(
+                traingen,
+                testgen,
+                trainlocs,
+                testlocs,
+                num_covs=num_covs,
+                seed=seed,
+                max_epochs=max_epochs,
+                batch_size=batch_size,
+                patience=patience,
+                verbose=verbose,
+            )
         )
-        self.score_l2_ = min(self.score_l2_losses_, key=self.score_l2_losses_.get)
         self.location_route_, self.env_weights_, self.env_mse_ = None, None, None
         self.crossfit_ids_, self.crossfit_env_ = None, None
         if num_covs > 0:
@@ -355,17 +357,17 @@ class EcoLocator:
             }
             fit_locs = [locs[fit_idx][:, 0:2], locs[fit_idx][:, 2:]]
             val_locs = [locs[val][:, 0:2], locs[val][:, 2:]]
-            model, _, _ = self._fit_network(
+            model, _, _, _ = self._fit_network(
                 gen["fit"],
                 gen["val"],
                 fit_locs,
                 val_locs,
-                self.num_covs_,
-                fold_seed,
-                max_epochs,
-                batch_size,
-                patience,
-                verbose,
+                num_covs=self.num_covs_,
+                seed=fold_seed,
+                max_epochs=max_epochs,
+                batch_size=batch_size,
+                patience=patience,
+                verbose=verbose,
                 penalties=[self.score_l2_],
             )
             route = self._fit_location_route(
@@ -454,6 +456,7 @@ class EcoLocator:
         testgen,
         trainlocs,
         testlocs,
+        *,
         num_covs,
         seed,
         max_epochs,
@@ -466,10 +469,9 @@ class EcoLocator:
         testgen/testlocs for early stopping and the choice of the score
         penalty. Genotypes are standardized with the means and SDs of both
         sets together. The network is fitted once per penalty of score_l2
-        (or of ``penalties``),
-        from the same seed, and the fit with the lowest covariate validation
-        loss (MSE) is kept. Returns that model, its history, and each
-        penalty's validation loss."""
+        (or of ``penalties``), from the same seed, and the fit with the lowest
+        covariate validation loss (MSE) is kept. Returns that model, its history, its penalty,
+        and each penalty's validation loss."""
         known = np.concatenate([traingen, testgen])
         geno_mean, geno_sd = known.mean(axis=0), known.std(axis=0)
         if penalties is None:
@@ -503,9 +505,9 @@ class EcoLocator:
             h = history.history
             key = f"val_{model.output_names[1]}_loss" if num_covs > 0 else "val_loss"
             losses[penalty] = float(h[key][int(np.argmin(h["val_loss"]))])
-            if best is None or losses[penalty] < best[2]:
-                best = (model, history, losses[penalty])
-        return best[0], best[1], losses
+            if best is None or losses[penalty] < losses[best[2]]:
+                best = (model, history, penalty)
+        return (*best, losses)
 
     def predict(
         self,
@@ -796,19 +798,19 @@ class EcoLocator:
 
             predgen = np.transpose(ac[:, [i]])
 
-            model, _, losses = self._fit_network(
+            model, _, penalty, _ = self._fit_network(
                 traingen,
                 testgen,
                 trainlocs,
                 testlocs,
-                num_covs,
-                fold_seed,
-                max_epochs,
-                batch_size,
-                patience,
-                verbose,
+                num_covs=num_covs,
+                seed=fold_seed,
+                max_epochs=max_epochs,
+                batch_size=batch_size,
+                patience=patience,
+                verbose=verbose,
             )
-            fold_penalties.append(min(losses, key=losses.get))
+            fold_penalties.append(penalty)
 
             prediction = model.predict(predgen)
             if shap_background_size is not None:

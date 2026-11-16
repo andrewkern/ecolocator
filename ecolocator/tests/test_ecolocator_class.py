@@ -696,8 +696,8 @@ def test_save_load_keeps_fitted_penalty(tmp_path, example_data):
     assert EcoLocator.load(str(tmp_path / "m")).score_l2_ == 60.0
 
 
-def test_load_model_of_submitted_network(tmp_path, example_data):
-    """testing that a model saved with the network of the submitted manuscript still loads and predicts"""
+def test_load_model_of_dense_network(tmp_path, example_data):
+    """testing that a model saved with the dense network (build_network) loads and predicts"""
     import json
 
     from ecolocator.network import build_network
@@ -712,8 +712,8 @@ def test_load_model_of_submitted_network(tmp_path, example_data):
         train_split=0.6,
     )
     fitted.save(str(tmp_path / "m"))
-    # Rewrite the saved model in the older format: the dense network, and
-    # parameters with only the older settings.
+    # Rewrite the saved model as one of the dense network: its model file,
+    # and parameters with only its settings.
     build_network(
         n_snps=len(fitted._kept_snp_indices_),
         num_covs=fitted.num_covs_,

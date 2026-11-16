@@ -152,9 +152,9 @@ def build_network(
     loc_weight: float = 1.0,
     env_weight: float = 1.0,
 ) -> tf.keras.Model:
-    """The network of the submitted manuscript (a dense trunk with linear
-    location and covariate heads). EcoLocator now uses build_pgs_network;
-    this one remains for comparisons with the submitted results."""
+    """A dense network: a trunk of dense ELU layers with linear location
+    and covariate heads. EcoLocator.load reads models saved with it, and it
+    serves as a baseline for comparisons with build_pgs_network."""
     geno_input = tf.keras.Input(shape=(n_snps,), name="geno_input")
     trunk = tf.keras.layers.BatchNormalization()(geno_input)
     for _ in range(int(np.floor(nlayers / 2))):
