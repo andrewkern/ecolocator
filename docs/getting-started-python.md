@@ -116,7 +116,8 @@ must be finite, and positive for covariates with the log transform.
 ```python
 import pandas as pd
 
-# One row per site, a column for every covariate of the model.
+# One row per site, a column for every covariate of the model, in the
+# same units as the sample metadata (not normalized).
 sites = pd.DataFrame(
     {"cov1": [0.2, 0.8], "cov2": [0.5, 0.1], "cov3": [0.3, 0.9]},
     index=["garden_a", "garden_b"],

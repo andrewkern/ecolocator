@@ -50,7 +50,9 @@ penalty relative to its covariate's error is K times this value),
 covariates). Training flags: `--cov-transforms`
 (comma-separated per-covariate, e.g. `none,log,log`), `--max-epochs`,
 `--patience`, `--batch-size`, `--min-mac`, `--max-snps`, `--train-split`,
-`--seed`, `--verbose`. Run `ecolocator train --help` for the full list.
+`--seed`, `--verbose`, and `--weight-folds` (folds for the covariate weights
+of the genomic offset, default 5; each costs one more network fit; see
+`ecolocator offset`). Run `ecolocator train --help` for the full list.
 
 ---
 
@@ -88,7 +90,8 @@ ecolocator offset \
   --out offsets.tsv
 ```
 
-`sites.tsv` has a column `site` and one column per covariate of the model.
+`sites.tsv` has a column `site` and one column per covariate of the model,
+in the same units as the sample metadata (not normalized).
 The output has one row per sample and site: `sampleID`, `site`, `offset`.
 Every sample gets an offset; samples the model trained on use their
 out-of-fold predictions, so the model must be trained with
