@@ -37,6 +37,32 @@ HYPERPARAMETERS = (
     "env_weight",
 )
 
+# Training of the location route (EcoLocator._fit_location_route). The
+# route has a few hundred weights, so Keras's cost per step dominates its
+# training: large batches, and early stopping that needs a real improvement,
+# keep it to seconds.
+ROUTE_DRAWS = 5
+ROUTE_BATCH_SIZE = 256
+ROUTE_MAX_EPOCHS = 1000
+ROUTE_PATIENCE = 20
+ROUTE_MIN_DELTA = 1e-4
+
+# Arrays of a fit that save() writes to arrays.npz when they exist.
+OPTIONAL_ARRAYS = ("train_ids", "crossfit_ids", "crossfit_env")
+
+
+def _derived_seed(seed, *key):
+    """A seed for one part of a run (a fold), from the run's seed and the
+    part's key; None without a seed."""
+    if seed is None:
+        return None
+    return int(np.random.SeedSequence([seed, *key]).generate_state(1)[0])
+
+
+def _as_list(values):
+    """A JSON-ready list of floats, or None."""
+    return None if values is None else [float(v) for v in values]
+
 
 class EcoLocator:
     """
@@ -83,6 +109,13 @@ class EcoLocator:
         self.score_l2 = score_l2
         self.loc_weight = loc_weight
         self.env_weight = env_weight
+        # Fitted state of the offset; fit() or load() sets it.
+        self.location_route_ = None
+        self.env_weights_ = None
+        self.env_mse_ = None
+        self.train_ids_ = None
+        self.crossfit_ids_ = None
+        self.crossfit_env_ = None
 
     @classmethod
     def load(cls, path: str) -> "EcoLocator":
@@ -105,29 +138,24 @@ class EcoLocator:
         obj.means_ = arrays["means"]
         obj.sds_ = arrays["sds"]
         obj._kept_snp_indices_ = arrays["kept_snp_indices"]
-        # Models saved before these arrays existed have none of them.
-        obj.train_ids_ = arrays["train_ids"] if "train_ids" in arrays else None
-        obj.crossfit_ids_ = arrays["crossfit_ids"] if "crossfit_ids" in arrays else None
-        obj.crossfit_env_ = arrays["crossfit_env"] if "crossfit_env" in arrays else None
+        for name in OPTIONAL_ARRAYS:
+            if name in arrays:
+                setattr(obj, name + "_", arrays[name])
 
         obj.cov_names_ = params["cov_names"]
         obj.seed_ = params["seed"]
         obj.num_covs_ = len(obj.cov_names_)
         obj.transforms_ = params["transforms"]
         obj.score_l2_ = params.get("score_l2_fitted")
-        weights = params.get("env_weights")
-        obj.env_weights_ = None if weights is None else np.array(weights)
-        errors = params.get("env_mse")
-        obj.env_mse_ = None if errors is None else np.array(errors)
+        for name in ("env_weights", "env_mse"):
+            if params.get(name) is not None:
+                setattr(obj, name + "_", np.array(params[name]))
 
         # Models saved without a location route predict as before;
         # predict(location_route=True) and offset() need one.
         route_path = os.path.join(path, "location_route.keras")
-        obj.location_route_ = (
-            tf.keras.models.load_model(route_path)
-            if os.path.exists(route_path)
-            else None
-        )
+        if os.path.exists(route_path):
+            obj.location_route_ = tf.keras.models.load_model(route_path)
 
         obj.model_ = tf.keras.models.load_model(
             os.path.join(path, "model.keras"),
@@ -139,7 +167,7 @@ class EcoLocator:
     def save(self, path: str) -> None:
         os.makedirs(path, exist_ok=True)
         self.model_.save(os.path.join(path, "model.keras"))
-        if getattr(self, "location_route_", None) is not None:
+        if self.location_route_ is not None:
             self.location_route_.save(os.path.join(path, "location_route.keras"))
         np.savez(
             os.path.join(path, "arrays.npz"),
@@ -150,17 +178,12 @@ class EcoLocator:
             means=self.means_,
             sds=self.sds_,
             kept_snp_indices=self._kept_snp_indices_,
-            # Plain string arrays, so that np.load() reads them without pickle.
-            **(
-                {"train_ids": self.train_ids_}
-                if getattr(self, "train_ids_", None) is not None
-                else {}
-            ),
-            **(
-                {"crossfit_ids": self.crossfit_ids_, "crossfit_env": self.crossfit_env_}
-                if getattr(self, "crossfit_env_", None) is not None
-                else {}
-            ),
+            # IDs are plain string arrays, so np.load() reads them without pickle.
+            **{
+                name: getattr(self, name + "_")
+                for name in OPTIONAL_ARRAYS
+                if getattr(self, name + "_") is not None
+            },
         )
         params = {
             "seed": self.seed_,
@@ -169,16 +192,8 @@ class EcoLocator:
             "transforms": self.transforms_,
             "cov_transforms": self.cov_transforms,
             "score_l2_fitted": self.score_l2_,
-            "env_weights": (
-                None
-                if getattr(self, "env_weights_", None) is None
-                else [float(w) for w in self.env_weights_]
-            ),
-            "env_mse": (
-                None
-                if getattr(self, "env_mse_", None) is None
-                else [float(e) for e in self.env_mse_]
-            ),
+            "env_weights": _as_list(self.env_weights_),
+            "env_mse": _as_list(self.env_mse_),
             **{k: getattr(self, k) for k in HYPERPARAMETERS},
         }
         with open(os.path.join(path, "params.json"), "w") as f:
@@ -237,6 +252,7 @@ class EcoLocator:
             genotypes, min_mac=min_mac, max_snps=max_snps, rng=rng
         )
         ac = replace_missing_data(genotypes, rng=rng)
+        del genotypes
 
         train = np.argwhere(~np.isnan(locs[:, 0])).flatten()
         test = rng.choice(train, round((1 - train_split) * len(train)), replace=False)
@@ -282,8 +298,9 @@ class EcoLocator:
                 max_epochs,
                 patience,
             )
+            crossfit = None
             if weight_folds >= 2:
-                self.env_weights_, self.env_mse_ = self._crossfit_weights(
+                crossfit = self._crossfit(
                     ac,
                     samples,
                     np.concatenate([train, test]),
@@ -292,43 +309,35 @@ class EcoLocator:
                     train_split,
                     seed,
                     rng,
-                    max_epochs,
-                    batch_size,
-                    patience,
-                    verbose,
+                    dict(
+                        max_epochs=max_epochs,
+                        batch_size=batch_size,
+                        patience=patience,
+                        verbose=verbose,
+                    ),
                 )
-            if self.env_weights_ is None:
-                val_loc, val_env = self.model_.predict(testgen, verbose=0)
-                self.env_weights_ = env_weights(
-                    testlocs[1],
-                    val_env,
-                    self.location_route_.predict(val_loc, verbose=0),
-                )
-                self.env_mse_ = env_errors(testlocs[1], val_env)
+            if crossfit is not None:
+                self.crossfit_ids_, observed, self.crossfit_env_, route = crossfit
+                predicted = self.crossfit_env_
+            else:
+                # Weights from the validation samples of the main fit.
+                val_loc, predicted = self.model_.predict(testgen, verbose=0)
+                observed = testlocs[1]
+                route = self.location_route_.predict(val_loc, verbose=0)
+            self.env_weights_ = env_weights(observed, predicted, route)
+            self.env_mse_ = env_errors(observed, predicted)
         return self
 
-    def _crossfit_weights(
-        self,
-        ac,
-        samples,
-        known,
-        locs,
-        folds,
-        train_split,
-        seed,
-        rng,
-        max_epochs,
-        batch_size,
-        patience,
-        verbose,
+    def _crossfit(
+        self, ac, samples, known, locs, folds, train_split, seed, rng, fit_settings
     ):
-        """Covariate weights and prediction errors from out-of-fold
-        predictions of the known samples (indices ``known`` into ac and the
-        normalized locs). Each fold's network uses the penalty of the main
-        fit. The out-of-fold predictions (normalized units) are kept in
-        crossfit_ids_ and crossfit_env_, for offset(). Returns (None, None)
-        (with a warning) when a fold would leave fewer than 2 samples to
-        fit."""
+        """Out-of-fold predictions of the known samples (indices ``known``
+        into ac and the normalized locs): in each fold, the network (with the
+        penalty of the main fit) and its location route are fitted on the
+        other folds and predict the fold. Returns (sample IDs, observed
+        covariates, predicted covariates, location-route predictions), all
+        in normalized units, or None (with a warning) when a fold would
+        leave fewer than 2 samples to fit."""
         folds = min(folds, len(known))
         smallest_rest = len(known) - int(np.ceil(len(known) / folds))
         if smallest_rest - max(1, round((1 - train_split) * smallest_rest)) < 2:
@@ -336,63 +345,53 @@ class EcoLocator:
                 f"Too few samples ({len(known)}) for {folds}-fold covariate weights; "
                 "using the validation samples of the main fit."
             )
-            return None, None
+            return None
+        # Samples x SNPs, contiguous, so each fold's rows are one slice.
+        genotypes = np.ascontiguousarray(ac.T)
         order = rng.permutation(known)
         fold_of = np.arange(len(order)) % folds
-        observed, predicted, routes, ids = [], [], [], []
+        held_all, predicted, routes = [], [], []
         for k in range(folds):
             held, rest = order[fold_of == k], order[fold_of != k]
             val = rng.choice(
                 rest, max(1, round((1 - train_split) * len(rest))), replace=False
             )
             fit_idx = np.setdiff1d(rest, val)
-            fold_seed = (
-                None
-                if seed is None
-                else int(np.random.SeedSequence([seed, 1, k]).generate_state(1)[0])
-            )
-            gen = {
-                n: np.transpose(ac[:, i])
-                for n, i in (("fit", fit_idx), ("val", val), ("held", held))
-            }
+            fold_seed = _derived_seed(seed, 1, k)
             fit_locs = [locs[fit_idx][:, 0:2], locs[fit_idx][:, 2:]]
             val_locs = [locs[val][:, 0:2], locs[val][:, 2:]]
             model, _, _, _ = self._fit_network(
-                gen["fit"],
-                gen["val"],
+                genotypes[fit_idx],
+                genotypes[val],
                 fit_locs,
                 val_locs,
                 num_covs=self.num_covs_,
                 seed=fold_seed,
-                max_epochs=max_epochs,
-                batch_size=batch_size,
-                patience=patience,
-                verbose=verbose,
                 penalties=[self.score_l2_],
+                **fit_settings,
             )
             route = self._fit_location_route(
                 model,
-                gen["fit"],
-                gen["val"],
+                genotypes[fit_idx],
+                genotypes[val],
                 fit_locs,
                 val_locs,
                 fold_seed,
-                max_epochs,
-                patience,
+                fit_settings["max_epochs"],
+                fit_settings["patience"],
             )
-            held_loc, held_env = model.predict(gen["held"], verbose=0)
-            observed.append(locs[held][:, 2:])
+            held_loc, held_env = model.predict(genotypes[held], verbose=0)
+            held_all.append(held)
             predicted.append(np.reshape(held_env, (len(held), -1)))
-            ids.append(samples[held])
             routes.append(
                 np.reshape(route.predict(held_loc, verbose=0), (len(held), -1))
             )
-        observed, predicted = np.concatenate(observed), np.concatenate(predicted)
-        self.crossfit_ids_ = np.asarray(np.concatenate(ids), dtype=str)
-        self.crossfit_env_ = predicted
+        held_all = np.concatenate(held_all)
         return (
-            env_weights(observed, predicted, np.concatenate(routes)),
-            env_errors(observed, predicted),
+            np.asarray(samples[held_all], dtype=str),
+            locs[held_all][:, 2:],
+            np.concatenate(predicted),
+            np.concatenate(routes),
         )
 
     def _fit_location_route(
@@ -405,12 +404,11 @@ class EcoLocator:
         seed,
         max_epochs,
         patience,
-        draws: int = 5,
     ):
         """Train a location route on a fitted network's predicted locations.
 
         The route's training inputs are the predicted locations of the
-        training samples with dropout active, ``draws`` times: the network
+        training samples with dropout active, ROUTE_DRAWS times: the network
         predicts training samples more closely than new samples, and
         dropout gives inputs with error, as the correction heads see them
         in training. Validation samples (predicted without dropout) stop the
@@ -424,26 +422,23 @@ class EcoLocator:
                     for i in range(0, len(traingen), 1024)
                 ]
             )
-            for _ in range(draws)
+            for _ in range(ROUTE_DRAWS)
         ]
         val_loc = model.predict(testgen, verbose=0)[0]
         route = build_location_route(self.num_covs_, self.head_width, self.weight_decay)
-        # The route has a few hundred weights, so Keras's cost per step
-        # dominates its training: large batches, and early stopping that
-        # needs a real improvement (min_delta), keep it to seconds.
         route.fit(
             np.concatenate(noisy),
-            np.tile(trainlocs[1], (draws, 1)),
+            np.tile(trainlocs[1], (ROUTE_DRAWS, 1)),
             validation_data=(val_loc, testlocs[1]),
-            epochs=min(max_epochs, 1000),
-            batch_size=256,
+            epochs=min(max_epochs, ROUTE_MAX_EPOCHS),
+            batch_size=ROUTE_BATCH_SIZE,
             shuffle=True,
             verbose=0,
             callbacks=[
                 tf.keras.callbacks.EarlyStopping(
                     monitor="val_loss",
-                    min_delta=1e-4,
-                    patience=min(patience, 20),
+                    min_delta=ROUTE_MIN_DELTA,
+                    patience=min(patience, ROUTE_PATIENCE),
                     restore_best_weights=True,
                 )
             ],
@@ -520,71 +515,72 @@ class EcoLocator:
         With ``location_route``, also each covariate's location-route
         prediction (column <covariate>_location): what the predicted
         location alone tells about it."""
+        if location_route and self.location_route_ is None:
+            raise ValueError("this model has no location route")
         genotypes, samples, _ = self._get_genotypes(genotype_path)
         _, locs = sort_samples(samples, sample_data_path)
         pred = np.argwhere(np.isnan(locs[:, 0])).flatten()
-        return self._predict_rows(genotypes, samples, pred, location_route)
+        loc, env = self._predict_normalized(genotypes, pred)
 
-    def _predict_rows(self, genotypes, samples, pred, location_route=False):
-        """Predictions of the samples at indices ``pred`` (see predict)."""
-        genotypes = genotypes[self._kept_snp_indices_, :, :]
-        ac = replace_missing_data(genotypes)
-        predgen = np.transpose(ac[:, pred])
-
-        prediction = self.model_.predict(predgen, verbose=0)
+        result = pd.DataFrame(
+            loc * np.array([self.sdlong_, self.sdlat_])
+            + np.array([self.meanlong_, self.meanlat_]),
+            columns=["x", "y"],
+        )
+        if env is not None:
+            result[self.cov_names_] = back_transform_env(
+                env, self.means_, self.sds_, self.transforms_
+            )
         if location_route:
-            if self.num_covs_ == 0 or getattr(self, "location_route_", None) is None:
-                raise ValueError("this model has no location route")
             route = back_transform_env(
-                self.location_route_.predict(prediction[0], verbose=0).reshape(
-                    len(pred), -1
+                np.reshape(
+                    self.location_route_.predict(loc, verbose=0), (len(pred), -1)
                 ),
                 self.means_,
                 self.sds_,
                 self.transforms_,
             )
-        if self.num_covs_ > 0:
-            pred_longlat = prediction[0] * np.array(
-                [self.sdlong_, self.sdlat_]
-            ) + np.array([self.meanlong_, self.meanlat_])
-            pred_env = back_transform_env(
-                prediction[1], self.means_, self.sds_, self.transforms_
+            for j, name in enumerate(self.cov_names_):
+                result[f"{name}_location"] = route[:, j]
+        result.insert(0, "sampleID", samples[pred])
+        return result
+
+    def _predict_normalized(self, genotypes, rows):
+        """The fitted model's outputs for the samples at indices ``rows``,
+        in normalized units: (location, covariates), covariates None without
+        covariates."""
+        ac = replace_missing_data(genotypes[self._kept_snp_indices_, :, :])
+        output = self.model_.predict(np.transpose(ac[:, rows]), verbose=0)
+        if self.num_covs_ == 0:
+            return output, None
+        return output[0], np.reshape(output[1], (len(rows), -1))
+
+    def _offset_weights(self, weights=None, scale_by_error=True) -> np.ndarray:
+        """Covariate weights of offset(): ``weights`` (default env_weights_),
+        divided by env_mse_ when scale_by_error and the model has it."""
+        if weights is None:
+            if self.env_weights_ is None:
+                raise ValueError("this model has no env_weights_; give weights")
+            weights = self.env_weights_
+        weights = np.asarray(weights, dtype=float)
+        if scale_by_error and self.env_mse_ is not None:
+            weights = weights / np.maximum(
+                np.asarray(self.env_mse_, dtype=float), 1e-12
             )
-
-            result = pd.DataFrame(pred_longlat, columns=["x", "y"])
-            cov_cols = pd.DataFrame(pred_env, columns=self.cov_names_)
-            result = pd.concat([result, cov_cols], axis=1)
-            if location_route:
-                for j, name in enumerate(self.cov_names_):
-                    result[f"{name}_location"] = route[:, j]
-            result.insert(0, "sampleID", samples[pred])
-            return result
-        else:
-            pred_longlat = prediction * np.array(
-                [self.sdlong_, self.sdlat_]
-            ) + np.array([self.meanlong_, self.meanlat_])
-
-            result = pd.DataFrame(pred_longlat, columns=["x", "y"])
-            result.insert(0, "sampleID", samples[pred])
-            return result
+        return weights
 
     @property
     def offset_weights_(self) -> np.ndarray:
         """The weights offset() uses by default: env_weights_ / env_mse_
         (env_weights_ alone for a model without env_mse_)."""
-        if getattr(self, "env_weights_", None) is None:
-            return None
-        errors = getattr(self, "env_mse_", None)
-        if errors is None:
-            return np.asarray(self.env_weights_, dtype=float)
-        return np.asarray(self.env_weights_, dtype=float) / np.maximum(errors, 1e-12)
+        return None if self.env_weights_ is None else self._offset_weights()
 
     @property
     def crossfit_predictions_(self) -> pd.DataFrame:
         """Out-of-fold covariate predictions of the training samples, from
         the weight folds of fit() (sampleID and one column per covariate);
         None if fit() ran without weight folds."""
-        if getattr(self, "crossfit_env_", None) is None:
+        if self.crossfit_env_ is None:
             return None
         env = back_transform_env(
             np.array(self.crossfit_env_, dtype=float),
@@ -629,71 +625,50 @@ class EcoLocator:
         Returns a DataFrame: sampleID, site, offset."""
         if self.num_covs_ == 0:
             raise ValueError("offset() needs a model with covariates")
-        if weights is None:
-            if getattr(self, "env_weights_", None) is None:
-                raise ValueError("this model has no env_weights_; give weights")
-            weights = self.env_weights_
-        weights = np.asarray(weights, dtype=float)
-        errors = getattr(self, "env_mse_", None)
-        if scale_by_error and errors is not None:
-            weights = weights / np.maximum(np.asarray(errors, dtype=float), 1e-12)
-
+        weights = self._offset_weights(weights, scale_by_error)
+        if self.train_ids_ is None:
+            raise ValueError(
+                "this model does not record its training samples; refit it to "
+                "compute offsets"
+            )
         genotypes, samples, _ = self._get_genotypes(genotype_path)
         _, locs = sort_samples(samples, sample_data_path)
         samples = np.asarray(samples, dtype=str)
-        trained = getattr(self, "train_ids_", None)
-        if trained is None:
-            # A model saved before train_ids_ existed: only samples with
-            # missing x/y are certainly unseen.
-            unseen = np.isnan(locs[:, 0])
-            logging.warning(
-                "this model does not record its training samples; offsets "
-                "only for samples with missing x/y"
+        unseen = np.isnan(locs[:, 0]) | ~np.isin(samples, self.train_ids_)
+        seen = samples[~unseen]
+        if len(seen) and self.crossfit_env_ is None:
+            raise ValueError(
+                f"{len(seen)} samples were used to fit this model; their offsets "
+                "need out-of-fold predictions: fit with weight_folds >= 2"
             )
-        else:
-            unseen = np.isnan(locs[:, 0]) | ~np.isin(samples, trained)
-        frames = []
         new = np.flatnonzero(unseen)
+        parts = []
         if len(new):
-            pred = self._predict_rows(genotypes, samples, new)
-            frames.append(
+            parts.append(
                 pd.DataFrame(
-                    transform_env(
-                        pred[self.cov_names_].to_numpy(),
-                        self.means_,
-                        self.sds_,
-                        self.transforms_,
-                    ),
-                    index=pred.sampleID,
+                    self._predict_normalized(genotypes, new)[1], index=samples[new]
                 )
             )
-        seen = samples[~unseen] if trained is not None else np.array([], dtype=str)
         if len(seen):
-            if getattr(self, "crossfit_env_", None) is None:
-                raise ValueError(
-                    f"{len(seen)} samples were used to fit this model; their offsets "
-                    "need out-of-fold predictions: fit with weight_folds >= 2"
-                )
             cv = pd.DataFrame(
                 np.array(self.crossfit_env_, dtype=float), index=self.crossfit_ids_
             )
-            frames.append(cv.loc[seen])
-        z_pred = pd.concat(frames).to_numpy()
-        ids = pd.concat(frames).index
+            parts.append(cv.loc[seen])
+        z_pred = pd.concat(parts)
         z_site = transform_env(
             sites[self.cov_names_].to_numpy(), self.means_, self.sds_, self.transforms_
         )
-        rows = [
-            pd.DataFrame(
-                {
-                    "sampleID": ids,
-                    "site": site,
-                    "offset": np.sqrt(((z - z_pred) ** 2) @ weights),
-                }
-            )
-            for site, z in zip(sites.index, z_site)
-        ]
-        return pd.concat(rows, ignore_index=True)
+        # Sites x samples: squared differences, weighted and summed over covariates.
+        distance = np.sqrt(
+            ((z_site[:, None, :] - z_pred.to_numpy()[None]) ** 2) @ weights
+        )
+        return pd.DataFrame(
+            {
+                "sampleID": np.tile(z_pred.index.to_numpy(), len(sites)),
+                "site": np.repeat(sites.index.to_numpy(), len(z_pred)),
+                "offset": distance.ravel(),
+            }
+        )
 
     def fit_predict_loo(
         self,
@@ -763,14 +738,8 @@ class EcoLocator:
             logging.info(
                 f"LOO fold {fold} ({n} of {len(fold_ids)}): holding out {samples[i]}"
             )
-            if seed is not None:
-                fold_rng = np.random.default_rng([seed, fold])
-                fold_seed = int(
-                    np.random.SeedSequence([seed, fold]).generate_state(1)[0]
-                )
-            else:
-                fold_rng = rng
-                fold_seed = None
+            fold_rng = rng if seed is None else np.random.default_rng([seed, fold])
+            fold_seed = _derived_seed(seed, fold)
             loo_locs = locs.copy()
             loo_locs[i] = np.nan
 

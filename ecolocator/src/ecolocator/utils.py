@@ -295,6 +295,12 @@ def transform_env(
     return (result - means) / sds
 
 
+def _as_matrix(values) -> np.ndarray:
+    """Samples x covariates as a float array (a vector is one covariate)."""
+    values = np.asarray(values, dtype=float)
+    return values.reshape(len(values), -1)
+
+
 def env_weights(
     observed: np.ndarray,
     predicted: np.ndarray,
@@ -310,8 +316,7 @@ def env_weights(
     location gets a weight near 0; one under selection keeps a positive
     weight, from the polygenic score."""
     observed, predicted, location_route = (
-        np.array(a, dtype=float, ndmin=2).reshape(len(a), -1)
-        for a in (observed, predicted, location_route)
+        _as_matrix(a) for a in (observed, predicted, location_route)
     )
 
     def r2(y, *xs):
@@ -338,8 +343,5 @@ def env_errors(observed: np.ndarray, predicted: np.ndarray) -> np.ndarray:
     covariates, normalized units), for samples the model did not train on.
     offset() divides each covariate's weight by it, so that covariates the
     network predicts poorly count less."""
-    observed, predicted = (
-        np.array(a, dtype=float, ndmin=2).reshape(len(a), -1)
-        for a in (observed, predicted)
-    )
+    observed, predicted = _as_matrix(observed), _as_matrix(predicted)
     return np.mean((observed - predicted) ** 2, axis=0)
