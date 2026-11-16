@@ -159,3 +159,12 @@ used as the SHAP background — larger values are more stable but slower. Use
 `--min-maf` to exclude low-frequency SNPs from the output. Add `--save-raw` to
 also write per-sample SHAP values to `<out-stem>_raw.tsv` alongside the summary.
 
+Add `--by-path` to attribute the covariate predictions split by the network's
+two paths (`EcoLocator.attribute`). The output has one row per SNP: `snp_id`,
+`maf`, and for each covariate `<cov>_weight` (the SNP's weight in the
+covariate's polygenic score) and the mean absolute attributions
+`<cov>_score` (the score alone), `<cov>_full` (the whole prediction),
+`<cov>_direct` (the path through the score), and `<cov>_location` (the path
+through the predicted location). `--n-samples` (default 200) sets the
+expected-gradients draws per attributed sample.
+

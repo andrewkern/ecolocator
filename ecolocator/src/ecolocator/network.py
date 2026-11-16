@@ -121,6 +121,96 @@ def build_pgs_network(
     return model
 
 
+def _covariate_models(model: tf.keras.Model):
+    """Two models of the covariate output of an EcoLocator network.
+
+    ``full`` is the network's own covariate output. ``direct`` computes the
+    same values with the same layers, but the predicted location reaches the
+    correction heads through an unconditional gradient stop, so its gradient
+    leaves out the path through the trunk. Called with ``training=False``
+    (dropout off), the two give the same output and differ only in their
+    gradients."""
+    num_covs = sum(layer.name.startswith("score_") for layer in model.layers)
+    location = tf.keras.layers.Lambda(tf.stop_gradient)(model.get_layer("loc").output)
+    covariates = []
+    for j in range(num_covs):
+        score = model.get_layer(f"score_{j}").output
+        hidden = model.get_layer(f"head_{j}")(
+            tf.keras.layers.Concatenate()([score, location])
+        )
+        correction = model.get_layer(f"correction_{j}")(hidden)
+        covariates.append(tf.keras.layers.Add()([score, correction]))
+    direct = (
+        covariates[0] if num_covs == 1 else tf.keras.layers.Concatenate()(covariates)
+    )
+    full = tf.keras.Model(inputs=model.input, outputs=model.outputs[1])
+    return full, tf.keras.Model(inputs=model.input, outputs=direct)
+
+
+def path_attributions(
+    model: tf.keras.Model,
+    x: np.ndarray,
+    background: np.ndarray,
+    n_samples: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """SHAP values of the covariate output of an EcoLocator network
+    (build_pgs_network) by expected gradients (the method of
+    ``shap.GradientExplainer``), split by path.
+
+    For sample i and covariate c, phi_ic = mean over k of
+    (x_i - b_k) * grad f_c(b_k + a_k (x_i - b_k)), with b_k a random row of
+    ``background`` and a_k drawn from U(0, 1). Gradients add over the paths
+    from the input to the output, so with the same draws for both parts:
+
+    - direct: the path through the scores, that is, the score itself and
+      the correction head's use of it;
+    - location: the path through the trunk and the predicted location.
+
+    direct + location is the full SHAP value. Summed over SNPs, it tends to
+    f_c(x_i) - mean_b f_c(b) as ``n_samples`` grows.
+
+    x and background are genotype rows (0/1/2 counts, as the model takes
+    them). Returns (direct, location), each of shape (samples, SNPs,
+    covariates), in the units of the model's covariate output."""
+    full, direct = _covariate_models(model)
+    num_covs = full.output.shape[-1]
+
+    @tf.function(reduce_retracing=True)
+    def gradients(points):
+        # One covariate at a time; the column slices must be taken inside
+        # the tape, or the tape cannot trace them back to the input.
+        with tf.GradientTape(persistent=True) as tape:
+            tape.watch(points)
+            f_full = full(points, training=False)
+            f_direct = direct(points, training=False)
+            parts = [(f_full[:, c], f_direct[:, c]) for c in range(num_covs)]
+        g_full = [tape.gradient(f, points) for f, _ in parts]
+        g_direct = [tape.gradient(d, points) for _, d in parts]
+        return tf.stack(g_full), tf.stack(g_direct)
+
+    x = np.asarray(x, dtype=np.float32)
+    background = np.asarray(background, dtype=np.float32)
+    n, n_snps = x.shape
+    out_direct = np.empty((n, n_snps, num_covs), np.float32)
+    out_location = np.empty((n, n_snps, num_covs), np.float32)
+    # Samples per batch: about 4 million genotype values of interpolation
+    # points at a time.
+    chunk = max(1, 4_000_000 // (n_samples * n_snps))
+    for start in range(0, n, chunk):
+        xs = x[start : start + chunk]
+        b = background[rng.integers(len(background), size=(len(xs), n_samples))]
+        a = rng.random((len(xs), n_samples, 1), dtype=np.float32)
+        diff = xs[:, None, :] - b
+        g_full, g_direct = gradients(tf.constant((b + a * diff).reshape(-1, n_snps)))
+        for c in range(num_covs):
+            gf = g_full[c].numpy().reshape(diff.shape)
+            gd = g_direct[c].numpy().reshape(diff.shape)
+            out_direct[start : start + chunk, :, c] = (diff * gd).mean(axis=1)
+            out_location[start : start + chunk, :, c] = (diff * (gf - gd)).mean(axis=1)
+    return out_direct, out_location
+
+
 def build_network(
     n_snps: int,
     num_covs: int,

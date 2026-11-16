@@ -12,7 +12,7 @@ from .utils import (
     replace_missing_data,
     back_transform_env,
 )
-from .network import build_pgs_network, train_network, euclid_loss
+from .network import build_pgs_network, path_attributions, train_network, euclid_loss
 from .settings import NETWORK_DEFAULTS as D
 
 # Network settings, saved with a model and passed to build_pgs_network
@@ -616,6 +616,87 @@ class EcoLocator:
                 vals = shap_env[:, :, var_idx - 2]
             summary[var] = np.abs(vals).mean(axis=0)
         return pd.DataFrame(summary)
+
+    def attribute(
+        self,
+        genotype_path: str,
+        sample_data_path: str,
+        background_size: int = 100,
+        n_samples: int = 200,
+        seed: int = None,
+    ) -> pd.DataFrame:
+        """SNP attributions of the covariate predictions, split by path.
+
+        Samples with missing ``x``/``y`` in ``sample_data_path`` are
+        attributed; up to ``background_size`` of the others, drawn at
+        random, form the background. Returns one row per SNP: ``snp_id``,
+        ``maf`` (over all samples of ``genotype_path``), and for each
+        covariate ``c``:
+
+        - ``c_weight``: the SNP's weight in the polygenic score of ``c``;
+        - ``c_score``: mean over the attributed samples of
+          ``|weight * z|``, with ``z`` the genotype standardized as the
+          model does it: the exact SHAP value of the score alone, against
+          the mean genotype of the training samples;
+        - ``c_full``: mean ``|SHAP value|`` of the prediction of ``c`` by
+          expected gradients (``n_samples`` draws per sample), through
+          every path from the genotypes;
+        - ``c_direct`` and ``c_location``: mean ``|SHAP value|`` of its two
+          parts (network.path_attributions), the path through the score
+          (the score and the correction head's use of it) and the path
+          through the trunk and the predicted location. For each sample
+          the signed parts add up to the signed full value.
+
+        The values are in the units of the network's covariate output:
+        SDs of the covariate in the data given to ``fit()``, after its
+        transform (``cov_transforms``).
+        """
+        if not hasattr(self, "model_"):
+            raise RuntimeError("EcoLocator must be fitted before calling attribute")
+        if self.network_ != "pgs":
+            raise ValueError(
+                "attribute() needs the EcoLocator network; for a model of "
+                "the dense network (build_network), use shap_values()"
+            )
+        if self.num_covs_ == 0:
+            raise ValueError("the model has no covariates to attribute")
+        rng = np.random.default_rng(seed if seed is not None else self.seed_)
+
+        genotypes, samples, snp_ids = self._get_genotypes(genotype_path)
+        genotypes = genotypes[self._kept_snp_indices_, :, :]
+        gen = np.transpose(replace_missing_data(genotypes, rng=rng)).astype(np.float32)
+        _, locs = sort_samples(samples, sample_data_path)
+        unknown = np.isnan(locs[:, 0])
+        known = np.flatnonzero(~unknown)
+        if not unknown.any():
+            raise ValueError("no sample to attribute: none has missing x/y")
+        if len(known) == 0:
+            raise ValueError("no background samples: every sample has missing x/y")
+        background = gen[
+            rng.choice(known, min(background_size, len(known)), replace=False)
+        ]
+        x = gen[unknown]
+
+        direct, location = path_attributions(self.model_, x, background, n_samples, rng)
+        z = tf.keras.Model(
+            inputs=self.model_.input,
+            outputs=self.model_.get_layer("standardize").output,
+        )(x, training=False).numpy()
+        freq = gen.mean(axis=0) / 2
+        table = {
+            "snp_id": np.asarray(snp_ids)[self._kept_snp_indices_],
+            "maf": np.minimum(freq, 1 - freq),
+        }
+        for c, name in enumerate(self.cov_names_):
+            weight = self.model_.get_layer(f"score_{c}").get_weights()[0][:, 0]
+            table[f"{name}_weight"] = weight
+            table[f"{name}_score"] = np.abs(z * weight).mean(axis=0)
+            table[f"{name}_full"] = np.abs(direct[:, :, c] + location[:, :, c]).mean(
+                axis=0
+            )
+            table[f"{name}_direct"] = np.abs(direct[:, :, c]).mean(axis=0)
+            table[f"{name}_location"] = np.abs(location[:, :, c]).mean(axis=0)
+        return pd.DataFrame(table)
 
     def _get_genotypes(self, genotype_path: str):
         if genotype_path.endswith(".zarr"):

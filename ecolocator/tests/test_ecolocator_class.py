@@ -789,3 +789,99 @@ def test_save_numpy_score_l2(tmp_path, example_data):
     loaded = EcoLocator.load(str(tmp_path / "m"))
     assert list(loaded.score_l2) == [20.0, 60.0]
     assert loaded.network_ == "pgs"
+
+
+def _masked(sample_data_path, tmp_path, rows=(0, 1)):
+    """A copy of the sample data with x/y missing for the given rows."""
+    sd = pd.read_csv(sample_data_path, sep="\t")
+    sd.loc[list(rows), ["x", "y"]] = np.nan
+    path = tmp_path / "masked.tsv"
+    sd.to_csv(path, sep="\t", index=False)
+    return path
+
+
+def test_attribute_returns_table(example_data, tmp_path):
+    """testing that attribute() gives one row per SNP and five columns per covariate"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=5,
+        patience=3,
+        train_split=0.6,
+        min_mac=1,
+        seed=1,
+    )
+    masked = _masked(sample_data_path, tmp_path)
+    result = model.attribute(str(matrix_path), str(masked), n_samples=20)
+    parts = ("weight", "score", "full", "direct", "location")
+    assert list(result.columns) == ["snp_id", "maf"] + [
+        f"{c}_{p}" for c in model.cov_names_ for p in parts
+    ]
+    assert len(result) == len(model._kept_snp_indices_)
+    for c in model.cov_names_:
+        assert (result[[f"{c}_{p}" for p in parts[1:]]] >= 0).all().all()
+        # Mean absolute values: the full value is at most the sum of its parts.
+        assert (
+            result[f"{c}_full"]
+            <= result[f"{c}_direct"] + result[f"{c}_location"] + 1e-6
+        ).all()
+    # Same seed, same draws.
+    again = model.attribute(str(matrix_path), str(masked), n_samples=20)
+    pd.testing.assert_frame_equal(result, again)
+
+
+def test_attribute_after_load(tmp_path, example_data):
+    """testing that a saved and loaded model gives the same attributions"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=5,
+        patience=3,
+        train_split=0.6,
+        min_mac=1,
+        seed=1,
+    )
+    model.save(str(tmp_path / "m"))
+    loaded = EcoLocator.load(str(tmp_path / "m"))
+    masked = _masked(sample_data_path, tmp_path)
+    expected = model.attribute(str(matrix_path), str(masked), n_samples=20, seed=3)
+    result = loaded.attribute(str(matrix_path), str(masked), n_samples=20, seed=3)
+    pd.testing.assert_frame_equal(result, expected, atol=1e-5)
+
+
+def test_attribute_checks(example_data, tmp_path):
+    """testing that attribute() refuses an unfitted model and samples it cannot use"""
+    _, _, matrix_path, sample_data_path = example_data
+    with pytest.raises(RuntimeError):
+        EcoLocator(**SMALL).attribute(str(matrix_path), str(sample_data_path))
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=1,
+        patience=1,
+        train_split=0.6,
+    )
+    with pytest.raises(ValueError, match="no sample to attribute"):
+        model.attribute(str(matrix_path), str(sample_data_path))
+    everyone = _masked(sample_data_path, tmp_path, rows=range(5))
+    with pytest.raises(ValueError, match="no background"):
+        model.attribute(str(matrix_path), str(everyone))
+    model.network_ = "dense"
+    with pytest.raises(ValueError, match="shap_values"):
+        model.attribute(str(matrix_path), str(_masked(sample_data_path, tmp_path)))
+
+
+def test_attribute_no_covariates(no_covariate_data, tmp_path):
+    """testing that attribute() refuses a model without covariates"""
+    matrix_path, sample_data_path = no_covariate_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=1,
+        patience=1,
+        train_split=0.6,
+    )
+    with pytest.raises(ValueError, match="no covariates"):
+        model.attribute(str(matrix_path), str(_masked(sample_data_path, tmp_path)))

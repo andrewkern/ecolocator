@@ -373,12 +373,41 @@ def attribute(
         help="Also save the per-sample raw SHAP values to <out-stem>_raw.tsv.",
     ),
     seed: Optional[int] = typer.Option(None, help="RNG seed for background sampling."),
+    by_path: bool = typer.Option(
+        False,
+        "--by-path",
+        help=(
+            "Attribute the covariate predictions instead, split by path: "
+            "for each covariate, the score weight and the mean absolute "
+            "score, full, direct, and location attributions of each SNP "
+            "(EcoLocator.attribute), with each SNP's MAF."
+        ),
+    ),
+    n_samples: int = typer.Option(
+        200, help="With --by-path: expected-gradients draws per attributed sample."
+    ),
 ) -> None:
     """Attribute SNP importance for samples with unknown coordinates using SHAP."""
     from .ecolocator_class import EcoLocator
 
+    if by_path and save_raw:
+        raise typer.BadParameter("--save-raw does not apply with --by-path")
     el = EcoLocator.load(str(model))
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    if by_path:
+        result = el.attribute(
+            genotype_path=str(genotypes),
+            sample_data_path=str(sample_data),
+            background_size=background_size,
+            n_samples=n_samples,
+            seed=seed,
+        )
+        if min_maf is not None:
+            result = result[result["maf"] >= min_maf]
+        result.to_csv(out, sep="\t", index=False)
+        typer.echo(f"Attributed {len(result)} SNPs by path → {out}")
+        return
 
     result = el.shap_values(
         genotype_path=str(genotypes),
