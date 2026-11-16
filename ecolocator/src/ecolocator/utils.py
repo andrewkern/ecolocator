@@ -261,7 +261,7 @@ def normalize_locs(
 
     x_norm = (locs[:, 0] - meanlong) / sdlong
     y_norm = (locs[:, 1] - meanlat) / sdlat
-    cov_norm = (cov_data - means) / sds
+    cov_norm = transform_env(locs[:, 2:], means, sds, transforms)
     norm_locs = np.column_stack([x_norm, y_norm, cov_norm])
 
     return meanlong, sdlong, meanlat, sdlat, means, sds, transforms, norm_locs

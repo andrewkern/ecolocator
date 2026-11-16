@@ -41,9 +41,11 @@ environmental covariate. Leave `x`/`y` blank (or `NA`) for samples whose
 location is to be predicted.
 
 Network flags: `--nlayers`, `--width`, `--dropout-prop`, `--input-dropout`,
-`--weight-decay` (the location trunk), `--head-width` (each covariate's
-correction head), `--score-l2` (the L2 penalty of the polygenic scores: one
-number, or comma-separated numbers to try; default `20,60,200,600`),
+`--weight-decay` (the location trunk and the covariates' correction
+heads), `--head-width` (each covariate's correction head), `--score-l2`
+(the L2 penalty of the polygenic scores: one number, or comma-separated
+numbers to try; default `20,60,200,600`; with K covariates, each score's
+penalty relative to its covariate's error is K times this value),
 `--loc-weight` and `--env-weight` (the balance between location and
 covariates). Training flags: `--cov-transforms`
 (comma-separated per-covariate, e.g. `none,log,log`), `--max-epochs`,
@@ -108,6 +110,9 @@ ecolocator loo \
     --sample-data data/test_sample_data_cov.txt \
     --out out/loo_predictions.tsv
 ```
+
+The output has one row per fold: `sampleID`, `x`, `y`, the covariates, and
+`score_l2`, the penalty that fold chose.
 
 Use `--max-folds N` to run only the first N folds, useful for a quick
 smoke-test before committing to a full run. All training hyperparameter flags

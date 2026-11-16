@@ -737,6 +737,9 @@ def test_load_model_of_dense_network(tmp_path, example_data):
     (tmp_path / "m" / "params.json").write_text(json.dumps(old))
     loaded = EcoLocator.load(str(tmp_path / "m"))
     assert loaded.score_l2_ is None
+    assert loaded.network_ == "dense"
+    with pytest.raises(ValueError, match="dense network"):
+        loaded.fit(str(matrix_path), str(sample_data_path), max_epochs=1, patience=1)
     sd = pd.read_csv(sample_data_path, sep="\t")
     sd.loc[:4, ["x", "y"]] = np.nan
     sd.to_csv(tmp_path / "pred_samples.tsv", sep="\t", index=False)
@@ -842,8 +845,9 @@ def test_offset_of_training_samples_needs_weight_folds(example_data, tmp_path):
         weight_folds=0,
     )
     sites = pd.DataFrame({"cov1": [0.2], "cov2": [0.5], "cov3": [0.3]}, index=["a"])
-    with pytest.raises(ValueError, match="weight_folds"):
+    with pytest.raises(ValueError, match="validation samples"):
         model.offset(str(matrix_path), str(sample_data_path), sites)
+    assert model.weight_folds_ == 0
 
 
 def test_save_load_keeps_location_route(tmp_path, example_data_30):
@@ -973,3 +977,103 @@ def test_cli_offset(example_data_30, tmp_path):
     off = pd.read_csv(out, sep="\t")
     assert len(off) == 60
     assert set(off.site) == {"a", "b"}
+
+
+def test_fit_without_validation_samples_raises(example_data):
+    """testing that a train_split leaving no validation samples gives a clear error"""
+    _, _, matrix_path, sample_data_path = example_data
+    with pytest.raises(ValueError, match="no validation samples"):
+        EcoLocator(**SMALL).fit(
+            str(matrix_path),
+            str(sample_data_path),
+            max_epochs=1,
+            patience=1,
+            train_split=1.0,
+        )
+
+
+def test_invalid_score_l2_raises(example_data):
+    """testing that an empty or negative penalty grid gives a clear error"""
+    _, _, matrix_path, sample_data_path = example_data
+    for bad in ((), (-1.0,)):
+        with pytest.raises(ValueError, match="score_l2"):
+            EcoLocator(**{**SMALL, "score_l2": bad}).fit(
+                str(matrix_path),
+                str(sample_data_path),
+                max_epochs=1,
+                patience=1,
+                train_split=0.6,
+            )
+
+
+def test_save_numpy_score_l2(tmp_path, example_data):
+    """testing that a model with a NumPy penalty grid saves and loads"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**{**SMALL, "score_l2": np.array([20.0, 60.0])}).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=1,
+        patience=1,
+        train_split=0.6,
+    )
+    model.save(str(tmp_path / "m"))
+    loaded = EcoLocator.load(str(tmp_path / "m"))
+    assert list(loaded.score_l2) == [20.0, 60.0]
+    assert loaded.network_ == "pgs"
+
+
+def test_offset_recognizes_training_samples_by_id_and_genotype(
+    example_data_30, tmp_path
+):
+    """testing that a training sample keeps its out-of-fold prediction when its x/y are
+    missing, and that another individual with a training ID gets the fitted model's"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=2,
+    )
+    sites = pd.DataFrame({"cov1": [0.8], "cov2": [0.1], "cov3": [0.9]}, index=["b"])
+    w = dict(weights=[1.0, 0.0, 0.0], scale_by_error=False)
+    cv = model.crossfit_predictions_.set_index("sampleID")
+    # Training samples with x/y missing in the offset's sample data.
+    masked = str(_masked(sample_data_path, tmp_path, n=3))
+    off = (
+        model.offset(str(matrix_path), masked, sites, **w).set_index("sampleID").offset
+    )
+    expected = np.abs(sites.loc["b", "cov1"] - cv.cov1) / model.sds_[0]
+    np.testing.assert_allclose(off.loc[cv.index], expected, rtol=1e-5)
+    # The same IDs with other genotypes: two training samples swap genotypes.
+    g = pd.read_csv(matrix_path, sep="\t", index_col=0)
+    a, b = g.index[:2]
+    g.loc[[a, b]] = g.loc[[b, a]].to_numpy()
+    swapped = tmp_path / "swapped.tsv"
+    g.to_csv(swapped, sep="\t")
+    off = model.offset(str(swapped), masked, sites, **w).set_index("sampleID").offset
+    sd = pd.read_csv(sample_data_path, sep="\t")
+    sd.loc[sd.sampleID.isin([a, b]), ["x", "y"]] = np.nan
+    sd.to_csv(tmp_path / "ab.tsv", sep="\t", index=False)
+    pred = model.predict(str(swapped), str(tmp_path / "ab.tsv")).set_index("sampleID")
+    expected = np.abs(sites.loc["b", "cov1"] - pred.cov1) / model.sds_[0]
+    np.testing.assert_allclose(off.loc[[a, b]], expected.loc[[a, b]], rtol=1e-5)
+
+
+def test_offset_checks_site_values(example_data_30, tmp_path):
+    """testing that a site value outside a covariate's transform raises"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    model = EcoLocator(**SMALL, cov_transforms=["log", "none", "none"]).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=2,
+    )
+    sites = pd.DataFrame({"cov1": [0.0], "cov2": [0.1], "cov3": [0.9]}, index=["b"])
+    with pytest.raises(ValueError, match="site values"):
+        model.offset(str(matrix_path), str(sample_data_path), sites)

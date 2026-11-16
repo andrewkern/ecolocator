@@ -50,11 +50,20 @@ def _make_model(cov_transforms: Optional[str], score_l2: str, **settings):
     comma-separated list; one value fixes the penalty."""
     from .ecolocator_class import EcoLocator
 
+    try:
+        penalties = tuple(float(v) for v in score_l2.split(","))
+    except ValueError:
+        raise typer.BadParameter(
+            f"{score_l2!r}: give one number or comma-separated numbers",
+            param_hint="--score-l2",
+        )
+    if not all(p >= 0 for p in penalties):
+        raise typer.BadParameter("penalties must be >= 0", param_hint="--score-l2")
     return EcoLocator(
         cov_transforms=[t.strip() for t in cov_transforms.split(",")]
         if cov_transforms
         else None,
-        score_l2=tuple(float(v) for v in score_l2.split(",")),
+        score_l2=penalties,
         **settings,
     )
 
@@ -377,6 +386,9 @@ def loo(
         fold_stop=fold_stop,
         shap_background_size=shap_background_size if shap_out else None,
     )
+    if set(result.columns) - {"sampleID", "x", "y"}:
+        # The score penalty that each fold chose (rows are folds).
+        result["score_l2"] = el.loo_score_l2_
     out.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(out, sep="\t", index=False)
     if shap_out is not None:

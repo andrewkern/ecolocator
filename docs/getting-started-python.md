@@ -72,8 +72,13 @@ predicts it well. `weights=` replaces `env_weights_`;
 Every prediction comes from a model that did not see the sample. Samples
 that `fit()` trained on (for example trees of known origin) use their
 out-of-fold predictions from the weight folds
-(`model.crossfit_predictions_`); all other samples use the fitted model.
-Offsets of training samples therefore need `weight_folds` of 2 or more.
+(`model.crossfit_predictions_`), whether or not their x/y are given; all
+other samples use the fitted model. A training sample is recognized by its
+ID and its genotypes, so another individual that reuses an ID is treated as
+new. Offsets of training samples therefore need `weight_folds` of 2 or
+more, and enough samples for the folds (`model.weight_folds_` is the number
+used; 0 means the weights come from the validation samples). Site values
+must be finite, and positive for covariates with the log transform.
 
 ```python
 import pandas as pd
