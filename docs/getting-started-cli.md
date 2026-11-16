@@ -72,6 +72,29 @@ column per covariate.
 
 ---
 
+## `ecolocator offset`
+
+Genomic offsets of the samples to sites (common gardens, future climates),
+from a model saved by `ecolocator train`:
+
+```bash
+ecolocator offset \
+  --model my_model \
+  --genotypes ./data/test_genotypes.vcf.gz \
+  --sample-data ./data/test_sample_data_cov.txt \
+  --sites sites.tsv \
+  --out offsets.tsv
+```
+
+`sites.tsv` has a column `site` and one column per covariate of the model.
+The output has one row per sample and site: `sampleID`, `site`, `offset`.
+Every sample gets an offset; samples the model trained on use their
+out-of-fold predictions, so the model must be trained with
+`--weight-folds` of 2 or more (the default is 5). Each covariate is
+weighted by how much the genotypes predict it beyond location, divided by
+its prediction error; `--no-error-scaling` drops the division. See the
+Python guide (Genomic offset) for the definition.
+
 ## `ecolocator loo`
 
 Runs leave-one-out cross-validation over all samples. Pass the **full**

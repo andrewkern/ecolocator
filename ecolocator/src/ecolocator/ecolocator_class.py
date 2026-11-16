@@ -104,6 +104,10 @@ class EcoLocator:
         obj.means_ = arrays["means"]
         obj.sds_ = arrays["sds"]
         obj._kept_snp_indices_ = arrays["kept_snp_indices"]
+        # Models saved before these arrays existed have none of them.
+        obj.train_ids_ = arrays["train_ids"] if "train_ids" in arrays else None
+        obj.crossfit_ids_ = arrays["crossfit_ids"] if "crossfit_ids" in arrays else None
+        obj.crossfit_env_ = arrays["crossfit_env"] if "crossfit_env" in arrays else None
 
         obj.cov_names_ = params["cov_names"]
         obj.seed_ = params["seed"]
@@ -145,6 +149,17 @@ class EcoLocator:
             means=self.means_,
             sds=self.sds_,
             kept_snp_indices=self._kept_snp_indices_,
+            # Plain string arrays, so that np.load() reads them without pickle.
+            **(
+                {"train_ids": self.train_ids_}
+                if getattr(self, "train_ids_", None) is not None
+                else {}
+            ),
+            **(
+                {"crossfit_ids": self.crossfit_ids_, "crossfit_env": self.crossfit_env_}
+                if getattr(self, "crossfit_env_", None) is not None
+                else {}
+            ),
         )
         params = {
             "seed": self.seed_,
@@ -238,6 +253,7 @@ class EcoLocator:
 
         self.num_covs_ = num_covs
         self.seed_ = seed
+        self.train_ids_ = np.asarray(samples[np.concatenate([train, test])], dtype=str)
         self.model_, self.history_, self.score_l2_losses_ = self._fit_network(
             traingen,
             testgen,
@@ -252,6 +268,7 @@ class EcoLocator:
         )
         self.score_l2_ = min(self.score_l2_losses_, key=self.score_l2_losses_.get)
         self.location_route_, self.env_weights_, self.env_mse_ = None, None, None
+        self.crossfit_ids_, self.crossfit_env_ = None, None
         if num_covs > 0:
             self.location_route_ = self._fit_location_route(
                 self.model_,
@@ -266,6 +283,7 @@ class EcoLocator:
             if weight_folds >= 2:
                 self.env_weights_, self.env_mse_ = self._crossfit_weights(
                     ac,
+                    samples,
                     np.concatenate([train, test]),
                     locs,
                     weight_folds,
@@ -290,6 +308,7 @@ class EcoLocator:
     def _crossfit_weights(
         self,
         ac,
+        samples,
         known,
         locs,
         folds,
@@ -304,8 +323,10 @@ class EcoLocator:
         """Covariate weights and prediction errors from out-of-fold
         predictions of the known samples (indices ``known`` into ac and the
         normalized locs). Each fold's network uses the penalty of the main
-        fit. Returns (None, None) (with a warning) when a fold would leave
-        fewer than 2 samples to fit."""
+        fit. The out-of-fold predictions (normalized units) are kept in
+        crossfit_ids_ and crossfit_env_, for offset(). Returns (None, None)
+        (with a warning) when a fold would leave fewer than 2 samples to
+        fit."""
         folds = min(folds, len(known))
         smallest_rest = len(known) - int(np.ceil(len(known) / folds))
         if smallest_rest - max(1, round((1 - train_split) * smallest_rest)) < 2:
@@ -316,7 +337,7 @@ class EcoLocator:
             return None, None
         order = rng.permutation(known)
         fold_of = np.arange(len(order)) % folds
-        observed, predicted, routes = [], [], []
+        observed, predicted, routes, ids = [], [], [], []
         for k in range(folds):
             held, rest = order[fold_of == k], order[fold_of != k]
             val = rng.choice(
@@ -360,10 +381,13 @@ class EcoLocator:
             held_loc, held_env = model.predict(gen["held"], verbose=0)
             observed.append(locs[held][:, 2:])
             predicted.append(np.reshape(held_env, (len(held), -1)))
+            ids.append(samples[held])
             routes.append(
                 np.reshape(route.predict(held_loc, verbose=0), (len(held), -1))
             )
         observed, predicted = np.concatenate(observed), np.concatenate(predicted)
+        self.crossfit_ids_ = np.asarray(np.concatenate(ids), dtype=str)
+        self.crossfit_env_ = predicted
         return (
             env_weights(observed, predicted, np.concatenate(routes)),
             env_errors(observed, predicted),
@@ -496,14 +520,16 @@ class EcoLocator:
         location alone tells about it."""
         genotypes, samples, _ = self._get_genotypes(genotype_path)
         _, locs = sort_samples(samples, sample_data_path)
+        pred = np.argwhere(np.isnan(locs[:, 0])).flatten()
+        return self._predict_rows(genotypes, samples, pred, location_route)
 
+    def _predict_rows(self, genotypes, samples, pred, location_route=False):
+        """Predictions of the samples at indices ``pred`` (see predict)."""
         genotypes = genotypes[self._kept_snp_indices_, :, :]
         ac = replace_missing_data(genotypes)
-
-        pred = np.argwhere(np.isnan(locs[:, 0])).flatten()
         predgen = np.transpose(ac[:, pred])
 
-        prediction = self.model_.predict(predgen)
+        prediction = self.model_.predict(predgen, verbose=0)
         if location_route:
             if self.num_covs_ == 0 or getattr(self, "location_route_", None) is None:
                 raise ValueError("this model has no location route")
@@ -540,6 +566,34 @@ class EcoLocator:
             result.insert(0, "sampleID", samples[pred])
             return result
 
+    @property
+    def offset_weights_(self) -> np.ndarray:
+        """The weights offset() uses by default: env_weights_ / env_mse_
+        (env_weights_ alone for a model without env_mse_)."""
+        if getattr(self, "env_weights_", None) is None:
+            return None
+        errors = getattr(self, "env_mse_", None)
+        if errors is None:
+            return np.asarray(self.env_weights_, dtype=float)
+        return np.asarray(self.env_weights_, dtype=float) / np.maximum(errors, 1e-12)
+
+    @property
+    def crossfit_predictions_(self) -> pd.DataFrame:
+        """Out-of-fold covariate predictions of the training samples, from
+        the weight folds of fit() (sampleID and one column per covariate);
+        None if fit() ran without weight folds."""
+        if getattr(self, "crossfit_env_", None) is None:
+            return None
+        env = back_transform_env(
+            np.array(self.crossfit_env_, dtype=float),
+            self.means_,
+            self.sds_,
+            self.transforms_,
+        )
+        result = pd.DataFrame(env, columns=self.cov_names_)
+        result.insert(0, "sampleID", self.crossfit_ids_)
+        return result
+
     def offset(
         self,
         genotype_path: str,
@@ -548,7 +602,7 @@ class EcoLocator:
         weights: np.ndarray = None,
         scale_by_error: bool = True,
     ) -> pd.DataFrame:
-        """Genomic offset of each sample with missing x/y to each site.
+        """Genomic offset of every sample in the sample data to each site.
 
         ``sites`` has one row per site (for example a common garden or a
         future climate) and a column for every covariate; its index names
@@ -556,6 +610,13 @@ class EcoLocator:
         Euclidean distance between the covariates EcoLocator predicts for i
         and those of g, in normalized units:
         sqrt(sum_c (w_c / e_c) (z_gc - zhat_ic)^2).
+
+        Every prediction comes from a model that did not see the sample:
+        samples that fit() trained on get their out-of-fold prediction from
+        the weight folds (crossfit_predictions_); all other samples (missing
+        x/y, or not in the training data) get the fitted model's
+        prediction. Training samples therefore need a fit with
+        weight_folds >= 2.
 
         ``weights`` (w_c) defaults to ``env_weights_``, so covariates that
         the genotypes predict only through location count little. e_c is
@@ -574,20 +635,56 @@ class EcoLocator:
         errors = getattr(self, "env_mse_", None)
         if scale_by_error and errors is not None:
             weights = weights / np.maximum(np.asarray(errors, dtype=float), 1e-12)
-        predicted = self.predict(genotype_path, sample_data_path)
-        z_pred = transform_env(
-            predicted[self.cov_names_].to_numpy(),
-            self.means_,
-            self.sds_,
-            self.transforms_,
-        )
+
+        genotypes, samples, _ = self._get_genotypes(genotype_path)
+        _, locs = sort_samples(samples, sample_data_path)
+        samples = np.asarray(samples, dtype=str)
+        trained = getattr(self, "train_ids_", None)
+        if trained is None:
+            # A model saved before train_ids_ existed: only samples with
+            # missing x/y are certainly unseen.
+            unseen = np.isnan(locs[:, 0])
+            logging.warning(
+                "this model does not record its training samples; offsets "
+                "only for samples with missing x/y"
+            )
+        else:
+            unseen = np.isnan(locs[:, 0]) | ~np.isin(samples, trained)
+        frames = []
+        new = np.flatnonzero(unseen)
+        if len(new):
+            pred = self._predict_rows(genotypes, samples, new)
+            frames.append(
+                pd.DataFrame(
+                    transform_env(
+                        pred[self.cov_names_].to_numpy(),
+                        self.means_,
+                        self.sds_,
+                        self.transforms_,
+                    ),
+                    index=pred.sampleID,
+                )
+            )
+        seen = samples[~unseen] if trained is not None else np.array([], dtype=str)
+        if len(seen):
+            if getattr(self, "crossfit_env_", None) is None:
+                raise ValueError(
+                    f"{len(seen)} samples were used to fit this model; their offsets "
+                    "need out-of-fold predictions: fit with weight_folds >= 2"
+                )
+            cv = pd.DataFrame(
+                np.array(self.crossfit_env_, dtype=float), index=self.crossfit_ids_
+            )
+            frames.append(cv.loc[seen])
+        z_pred = pd.concat(frames).to_numpy()
+        ids = pd.concat(frames).index
         z_site = transform_env(
             sites[self.cov_names_].to_numpy(), self.means_, self.sds_, self.transforms_
         )
         rows = [
             pd.DataFrame(
                 {
-                    "sampleID": predicted.sampleID,
+                    "sampleID": ids,
                     "site": site,
                     "offset": np.sqrt(((z - z_pred) ** 2) @ weights),
                 }

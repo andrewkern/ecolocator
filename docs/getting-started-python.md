@@ -60,14 +60,20 @@ under selection keeps a positive weight from its polygenic score.
 `model.env_mse_` holds each covariate's cross-fitted prediction error
 (mean squared error in normalized units), from the same folds.
 
-`offset()` gives the genomic offset of each sample to each site (for
-example a common garden or a future climate): the Euclidean distance
-between the covariates EcoLocator predicts for the sample and those of the
-site, in normalized units, with each covariate weighted by
-`env_weights_ / env_mse_`. A covariate counts more when the genotype
-predicts it beyond location and when the network predicts it well.
-`weights=` replaces `env_weights_`; `scale_by_error=False` drops the
-division by `env_mse_`.
+`offset()` gives the genomic offset of every sample in the sample data to
+each site (for example a common garden or a future climate): the Euclidean
+distance between the covariates EcoLocator predicts for the sample and
+those of the site, in normalized units, with each covariate weighted by
+`env_weights_ / env_mse_` (`model.offset_weights_`). A covariate counts
+more when the genotype predicts it beyond location and when the network
+predicts it well. `weights=` replaces `env_weights_`;
+`scale_by_error=False` drops the division by `env_mse_`.
+
+Every prediction comes from a model that did not see the sample. Samples
+that `fit()` trained on (for example trees of known origin) use their
+out-of-fold predictions from the weight folds
+(`model.crossfit_predictions_`); all other samples use the fitted model.
+Offsets of training samples therefore need `weight_folds` of 2 or more.
 
 ```python
 import pandas as pd

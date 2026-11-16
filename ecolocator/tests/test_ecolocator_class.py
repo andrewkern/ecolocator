@@ -786,18 +786,19 @@ def test_fit_location_route_and_weights(example_data, tmp_path):
     assert np.isfinite(result.drop(columns="sampleID").to_numpy()).all()
 
 
-def test_offset(example_data, tmp_path):
-    """testing that offset() gives one weighted distance per sample and site"""
-    _, _, matrix_path, sample_data_path = example_data
+def test_offset(example_data_30, tmp_path):
+    """testing that offset() gives every sample an offset from a model that did not see it"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    masked = str(_masked(sample_data_path, tmp_path, n=5))
     model = EcoLocator(**SMALL).fit(
         str(matrix_path),
-        str(sample_data_path),
+        masked,
         max_epochs=3,
         patience=2,
         train_split=0.6,
         seed=3,
+        weight_folds=2,
     )
-    masked = str(_masked(sample_data_path, tmp_path))
     sites = pd.DataFrame(
         {"cov1": [0.2, 0.8], "cov2": [0.5, 0.1], "cov3": [0.3, 0.9]}, index=["a", "b"]
     )
@@ -805,20 +806,31 @@ def test_offset(example_data, tmp_path):
         str(matrix_path), masked, sites, weights=[1.0, 0.0, 0.0], scale_by_error=False
     )
     assert list(off.columns) == ["sampleID", "site", "offset"]
-    assert len(off) == 2 * len(sites)
+    assert len(off) == 30 * len(sites)
+    b = off[off.site == "b"].set_index("sampleID").offset
+    # Samples with missing x/y: the fitted model's predictions.
     pred = model.predict(str(matrix_path), masked).set_index("sampleID")
     expected = np.abs(sites.loc["b", "cov1"] - pred.cov1) / model.sds_[0]
-    got = off[off.site == "b"].set_index("sampleID").offset.loc[pred.index]
-    np.testing.assert_allclose(got, expected, rtol=1e-5)
-    assert (model.offset(str(matrix_path), masked, sites).offset >= 0).all()
+    np.testing.assert_allclose(b.loc[pred.index], expected, rtol=1e-5)
+    # Training samples: their out-of-fold predictions.
+    cv = model.crossfit_predictions_.set_index("sampleID")
+    assert set(cv.index) == set(model.train_ids_)
+    expected = np.abs(sites.loc["b", "cov1"] - cv.cov1) / model.sds_[0]
+    np.testing.assert_allclose(b.loc[cv.index], expected, rtol=1e-5)
     # By default each weight is divided by the covariate's prediction error.
     scaled = model.offset(str(matrix_path), masked, sites, weights=[1.0, 0.0, 0.0])
     got = scaled[scaled.site == "b"].set_index("sampleID").offset.loc[pred.index]
-    np.testing.assert_allclose(got, expected / np.sqrt(model.env_mse_[0]), rtol=1e-5)
+    np.testing.assert_allclose(
+        got, b.loc[pred.index] / np.sqrt(model.env_mse_[0]), rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        model.offset_weights_, model.env_weights_ / model.env_mse_
+    )
+    assert (model.offset(str(matrix_path), masked, sites).offset >= 0).all()
 
 
-def test_save_load_keeps_location_route(tmp_path, example_data):
-    """testing that a saved and loaded model keeps its location route and weights"""
+def test_offset_of_training_samples_needs_weight_folds(example_data, tmp_path):
+    """testing that offsets of training samples need out-of-fold predictions"""
     _, _, matrix_path, sample_data_path = example_data
     model = EcoLocator(**SMALL).fit(
         str(matrix_path),
@@ -827,11 +839,33 @@ def test_save_load_keeps_location_route(tmp_path, example_data):
         patience=2,
         train_split=0.6,
         seed=3,
+        weight_folds=0,
+    )
+    sites = pd.DataFrame({"cov1": [0.2], "cov2": [0.5], "cov3": [0.3]}, index=["a"])
+    with pytest.raises(ValueError, match="weight_folds"):
+        model.offset(str(matrix_path), str(sample_data_path), sites)
+
+
+def test_save_load_keeps_location_route(tmp_path, example_data_30):
+    """testing that a saved and loaded model keeps its location route and weights"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=2,
     )
     model.save(str(tmp_path / "m"))
     loaded = EcoLocator.load(str(tmp_path / "m"))
     np.testing.assert_allclose(loaded.env_weights_, model.env_weights_)
     np.testing.assert_allclose(loaded.env_mse_, model.env_mse_)
+    pd.testing.assert_frame_equal(
+        loaded.crossfit_predictions_, model.crossfit_predictions_
+    )
+    np.testing.assert_array_equal(loaded.train_ids_, model.train_ids_)
     masked = str(_masked(sample_data_path, tmp_path))
     a = model.predict(str(matrix_path), masked, location_route=True)
     b = loaded.predict(str(matrix_path), masked, location_route=True)
@@ -892,7 +926,50 @@ def test_offset_with_masked_covariates(example_data_30, tmp_path):
     assert np.all(np.isfinite(model.env_weights_))
     sites = pd.DataFrame({"cov1": [0.2], "cov2": [0.5], "cov3": [0.3]}, index=["a"])
     off = model.offset(str(matrix_path), str(masked), sites)
-    assert len(off) == 5
+    assert len(off) == 30
     assert np.isfinite(off.offset).all()
     pred = model.predict(str(matrix_path), str(masked), location_route=True)
     assert np.isfinite(pred.drop(columns="sampleID").to_numpy()).all()
+
+
+def test_cli_offset(example_data_30, tmp_path):
+    """testing that the offset command writes one offset per sample and site"""
+    from typer.testing import CliRunner
+
+    from ecolocator.cli import app
+
+    _, _, matrix_path, sample_data_path = example_data_30
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=2,
+    )
+    model.save(str(tmp_path / "m"))
+    pd.DataFrame(
+        {"site": ["a", "b"], "cov1": [0.2, 0.8], "cov2": [0.5, 0.1], "cov3": [0.3, 0.9]}
+    ).to_csv(tmp_path / "sites.tsv", sep="\t", index=False)
+    out = tmp_path / "offsets.tsv"
+    result = CliRunner().invoke(
+        app,
+        [
+            "offset",
+            "--model",
+            str(tmp_path / "m"),
+            "--genotypes",
+            str(matrix_path),
+            "--sample-data",
+            str(sample_data_path),
+            "--sites",
+            str(tmp_path / "sites.tsv"),
+            "--out",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    off = pd.read_csv(out, sep="\t")
+    assert len(off) == 60
+    assert set(off.site) == {"a", "b"}

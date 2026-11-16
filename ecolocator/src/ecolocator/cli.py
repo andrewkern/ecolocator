@@ -193,6 +193,75 @@ def predict(
 
 
 @app.command()
+def offset(
+    model: Path = typer.Option(
+        ...,
+        "--model",
+        "-m",
+        exists=True,
+        file_okay=False,
+        help="Directory containing a saved EcoLocator model (from `ecolocator train`).",
+    ),
+    genotypes: Path = typer.Option(
+        ...,
+        "--genotypes",
+        "-g",
+        exists=True,
+        readable=True,
+        help="Genotype input: .vcf, .vcf.gz, .zarr, or dosage-matrix TSV.",
+    ),
+    sample_data: Path = typer.Option(
+        ...,
+        "--sample-data",
+        "-s",
+        exists=True,
+        readable=True,
+        dir_okay=False,
+        help="Sample metadata TSV. Every sample gets an offset; samples the model "
+        "trained on use their out-of-fold predictions.",
+    ),
+    sites: Path = typer.Option(
+        ...,
+        "--sites",
+        exists=True,
+        readable=True,
+        dir_okay=False,
+        help="Sites TSV: a column site, then one column per covariate of the model.",
+    ),
+    out: Path = typer.Option(
+        ...,
+        "--out",
+        "-o",
+        dir_okay=False,
+        help="Output TSV path: sampleID, site, offset.",
+    ),
+    no_error_scaling: bool = typer.Option(
+        False,
+        "--no-error-scaling",
+        help="Weight covariates by env_weights_ alone, not divided by their prediction errors.",
+    ),
+) -> None:
+    """Genomic offsets of the samples to sites (gardens, future climates)."""
+    import pandas as pd
+
+    from .ecolocator_class import EcoLocator
+
+    el = EcoLocator.load(str(model))
+    site_table = pd.read_csv(sites, sep="\t").set_index("site")
+    result = el.offset(
+        str(genotypes),
+        str(sample_data),
+        site_table,
+        scale_by_error=not no_error_scaling,
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(out, sep="\t", index=False)
+    typer.echo(
+        f"Offsets of {result.sampleID.nunique()} samples to {len(site_table)} sites → {out}"
+    )
+
+
+@app.command()
 def loo(
     genotypes: Path = typer.Option(
         ...,
