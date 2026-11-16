@@ -57,15 +57,16 @@ def _make_model(cov_transforms: Optional[str], score_l2: str, **settings):
             f"{score_l2!r}: give one number or comma-separated numbers",
             param_hint="--score-l2",
         )
-    if not all(p >= 0 for p in penalties):
-        raise typer.BadParameter("penalties must be >= 0", param_hint="--score-l2")
-    return EcoLocator(
-        cov_transforms=[t.strip() for t in cov_transforms.split(",")]
-        if cov_transforms
-        else None,
-        score_l2=penalties,
-        **settings,
-    )
+    try:
+        return EcoLocator(
+            cov_transforms=[t.strip() for t in cov_transforms.split(",")]
+            if cov_transforms
+            else None,
+            score_l2=penalties,
+            **settings,
+        )
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint="--score-l2")
 
 
 @app.command()
@@ -387,8 +388,9 @@ def loo(
         shap_background_size=shap_background_size if shap_out else None,
     )
     if set(result.columns) - {"sampleID", "x", "y"}:
-        # The score penalty that each fold chose (rows are folds).
-        result["score_l2"] = el.loo_score_l2_
+        # The score penalty that each fold chose (rows are folds). The
+        # name has a prefix, so that it cannot replace a covariate column.
+        result["fold_score_l2"] = el.loo_score_l2_
     out.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(out, sep="\t", index=False)
     if shap_out is not None:
