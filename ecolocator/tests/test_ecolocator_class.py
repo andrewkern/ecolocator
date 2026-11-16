@@ -740,6 +740,10 @@ def test_load_model_of_dense_network(tmp_path, example_data):
     assert loaded.network_ == "dense"
     with pytest.raises(ValueError, match="dense network"):
         loaded.fit(str(matrix_path), str(sample_data_path), max_epochs=1, patience=1)
+    with pytest.raises(ValueError, match="dense network"):
+        loaded.fit_predict_loo(
+            str(matrix_path), str(sample_data_path), max_epochs=1, patience=1
+        )
     sd = pd.read_csv(sample_data_path, sep="\t")
     sd.loc[:4, ["x", "y"]] = np.nan
     sd.to_csv(tmp_path / "pred_samples.tsv", sep="\t", index=False)
@@ -789,3 +793,37 @@ def test_save_numpy_score_l2(tmp_path, example_data):
     loaded = EcoLocator.load(str(tmp_path / "m"))
     assert list(loaded.score_l2) == [20.0, 60.0]
     assert loaded.network_ == "pgs"
+
+
+def test_invalid_score_l2_raises_at_construction():
+    """testing that a bad penalty is refused when the model is made, with or without covariates"""
+    for bad in ((), (-1.0,), float("inf"), "abc"):
+        with pytest.raises(ValueError, match="score_l2"):
+            EcoLocator(**{**SMALL, "score_l2": bad})
+
+
+def test_save_zero_dimensional_score_l2(tmp_path, example_data):
+    """testing that a model with a 0-d array penalty saves and loads"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**{**SMALL, "score_l2": np.array(60.0)}).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=1,
+        patience=1,
+        train_split=0.6,
+    )
+    model.save(str(tmp_path / "m"))
+    assert EcoLocator.load(str(tmp_path / "m")).score_l2 == 60.0
+
+
+def test_column_mean_sd_in_row_chunks():
+    """testing that the chunked mean and SD equal those of the stacked blocks"""
+    from ecolocator.ecolocator_class import _column_mean_sd
+
+    rng = np.random.default_rng(0)
+    a = rng.integers(0, 3, size=(7, 5)).astype(np.uint8)
+    b = rng.integers(0, 3, size=(4, 5)).astype(np.uint8)
+    mean, sd = _column_mean_sd(a, b, rows=3)
+    both = np.vstack([a, b]).astype(float)
+    np.testing.assert_allclose(mean, both.mean(axis=0))
+    np.testing.assert_allclose(sd, both.std(axis=0))
