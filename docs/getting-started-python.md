@@ -30,6 +30,39 @@ model.save("my_model")
 `params.json`, and, for a model with covariates, `location_route.keras`
 (see Genomic offset).
 
+### Network settings
+
+`EcoLocator()` takes the network settings; the defaults are in
+`ecolocator.settings.NETWORK_DEFAULTS`:
+
+```python
+model = EcoLocator(
+    nlayers=4,          # dense ELU layers of the location trunk
+    width=128,          # units per trunk layer
+    dropout_prop=0.25,  # dropout after each trunk layer
+    input_dropout=0.1,  # dropout on the genotypes
+    weight_decay=2e-4,  # L2 decay of the trunk and the correction heads
+    head_width=16,      # units of each covariate's correction head
+    score_l2=(20, 60, 200, 600),  # L2 penalty of the polygenic scores
+    loc_weight=1.0,     # loss weights: the balance between location
+    env_weight=1.0,     # and the covariates
+)
+```
+
+`score_l2` is one number (a fixed penalty) or a sequence of penalties:
+`fit()` then fits the network once per penalty and keeps the fit with the
+lowest covariate validation loss. The chosen penalty is `model.score_l2_`,
+and each penalty's validation loss is in `model.score_l2_losses_`. The
+covariate loss is the mean squared error over the K covariates, so with K
+covariates each score's penalty, relative to its covariate's own error, is
+K times `score_l2`; the default grid is tuned with this scaling.
+
+`fit()` holds out `1 - train_split` of the samples with known coordinates
+for validation (early stopping and the penalty choice), and raises an
+error if that leaves no validation samples. Models saved with the earlier
+dense network (`ecolocator.network.build_network`) load, predict, and
+explain as they were fitted, but `fit()` does not refit them.
+
 ## Predict
 
 ```python
@@ -128,6 +161,10 @@ loo = model.fit_predict_loo(
 )
 model.loo_shap_["values"].shape  # (folds, SNPs, outputs)
 ```
+
+Each fold searches the `score_l2` grid as `fit()` does; the penalty each
+fold chose is in `model.loo_score_l2_`. For a cheaper LOO, fix `score_l2`
+to one number, for example the penalty that `fit()` chose on all samples.
 
 ## SHAP feature attribution
 
