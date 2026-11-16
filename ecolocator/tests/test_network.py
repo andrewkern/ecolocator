@@ -88,3 +88,17 @@ def test_pgs_save_load(tmp_path):
     np.testing.assert_allclose(
         loaded.predict(G, verbose=0)[1], model.predict(G, verbose=0)[1], atol=1e-6
     )
+
+
+def test_pgs_score_l2_penalty_independent_of_num_covs():
+    """testing that a covariate's score penalty, relative to its data-loss
+    weight, does not change with the number of covariates"""
+    scaled_losses = {}
+    for num_covs in (1, 3):
+        model, G = _pgs(num_covs=num_covs, n_snps=10)
+        model.get_layer("score_0").set_weights([np.ones((10, 1), dtype=np.float32)])
+        model(G[:1])  # forward pass to populate layer.losses
+        scaled_losses[num_covs] = (
+            model.get_layer("score_0").losses[0].numpy() * num_covs
+        )
+    np.testing.assert_allclose(scaled_losses[1], scaled_losses[3])

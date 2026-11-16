@@ -44,8 +44,8 @@ Network flags: `--nlayers`, `--width`, `--dropout-prop`, `--input-dropout`,
 `--weight-decay` (the location trunk and the covariates' correction
 heads), `--head-width` (each covariate's correction head), `--score-l2`
 (the L2 penalty of the polygenic scores: one number, or comma-separated
-numbers to try; default `20,60,200,600`; with K covariates, each score's
-penalty relative to its covariate's error is K times this value),
+numbers to try; default `20,60,200,600`; relative to a covariate's own
+error, the same penalty for any number of covariates),
 `--loc-weight` and `--env-weight` (the balance between location and
 covariates). Training flags: `--cov-transforms`
 (comma-separated per-covariate, e.g. `none,log,log`), `--max-epochs`,
