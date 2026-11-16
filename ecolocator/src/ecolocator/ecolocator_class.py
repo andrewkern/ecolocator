@@ -525,11 +525,35 @@ class EcoLocator:
         min_maf: float = None,
         seed: int = None,
         raw: bool = False,
+        by_path: bool = False,
     ) -> pd.DataFrame:
+        """SHAP values of the predictions, by expected gradients
+        (``shap.GradientExplainer``).
+
+        Samples with missing ``x``/``y`` in ``sample_data_path`` are
+        attributed; up to ``background_size`` samples with known ``x``/``y``
+        in ``train_sample_data_path``, drawn at random, form the background.
+        Returns one row per SNP: ``snp_id`` and, for ``x``, ``y``, and each
+        covariate, the mean absolute SHAP value over the attributed samples.
+        Covariate values are in SDs of the covariate, after its transform.
+        With ``raw``, returns instead one row per attributed sample and one
+        column per SNP and output (``<snp_id>_<output>``), signed.
+
+        With ``by_path``, each covariate ``c`` also gets the two parts of its
+        SHAP value: ``c_score``, the path through the SNP's polygenic score
+        (the score and the correction head's use of it), and
+        ``c_location``, the path through the predicted location. For each
+        sample the signed parts add up to the signed value of ``c``
+        (network.path_attributions).
+        """
         import shap
 
         if not hasattr(self, "model_"):
             raise RuntimeError("EcoLocator must be fitted before calling shap_values")
+        if by_path and (self.network_ != "pgs" or self.num_covs_ == 0):
+            raise ValueError(
+                "by_path needs the EcoLocator network with at least one covariate"
+            )
 
         rng = np.random.default_rng(seed if seed is not None else self.seed_)
 
@@ -566,14 +590,21 @@ class EcoLocator:
 
         # compute shap
         expl_loc = shap.GradientExplainer(model_loc, background)
-        shap_loc = expl_loc.shap_values(predgen)
+        # rseed: the explainer's own draws follow the seed too.
+        shap_loc = expl_loc.shap_values(predgen, rseed=int(rng.integers(2**31)))
 
-        if self.num_covs_ > 0:
+        if by_path:
+            # 200 draws per sample, as GradientExplainer takes by default.
+            env_score, env_location = path_attributions(
+                self.model_, predgen, background, 200, rng
+            )
+            shap_env = env_score + env_location
+        elif self.num_covs_ > 0:
             model_env = tf.keras.Model(
                 inputs=self.model_.input, outputs=self.model_.output[1]
             )
             expl_env = shap.GradientExplainer(model_env, background)
-            shap_env = expl_env.shap_values(predgen)
+            shap_env = expl_env.shap_values(predgen, rseed=int(rng.integers(2**31)))
 
         snp_ids = train_snp_ids[self._kept_snp_indices_]
 
@@ -586,6 +617,9 @@ class EcoLocator:
             shap_loc = shap_loc[:, mask, :]
             if self.num_covs_ > 0:
                 shap_env = shap_env[:, mask, :]
+            if by_path:
+                env_score = env_score[:, mask, :]
+                env_location = env_location[:, mask, :]
 
         n_samples = predgen.shape[0]
         if n_samples == 1:
@@ -603,6 +637,11 @@ class EcoLocator:
                     row[f"{snp_id}_y"] = shap_loc[k, col_idx, 1]
                     for j, cov in enumerate(self.cov_names_):
                         row[f"{snp_id}_{cov}"] = shap_env[k, col_idx, j]
+                        if by_path:
+                            row[f"{snp_id}_{cov}_score"] = env_score[k, col_idx, j]
+                            row[f"{snp_id}_{cov}_location"] = env_location[
+                                k, col_idx, j
+                            ]
                 rows.append(row)
             return pd.DataFrame(rows)
 
@@ -615,88 +654,14 @@ class EcoLocator:
             else:
                 vals = shap_env[:, :, var_idx - 2]
             summary[var] = np.abs(vals).mean(axis=0)
+            if by_path and var_idx >= 2:
+                summary[f"{var}_score"] = np.abs(env_score[:, :, var_idx - 2]).mean(
+                    axis=0
+                )
+                summary[f"{var}_location"] = np.abs(
+                    env_location[:, :, var_idx - 2]
+                ).mean(axis=0)
         return pd.DataFrame(summary)
-
-    def attribute(
-        self,
-        genotype_path: str,
-        sample_data_path: str,
-        background_size: int = 100,
-        n_samples: int = 200,
-        seed: int = None,
-    ) -> pd.DataFrame:
-        """SNP attributions of the covariate predictions, split by path.
-
-        Samples with missing ``x``/``y`` in ``sample_data_path`` are
-        attributed; up to ``background_size`` of the others, drawn at
-        random, form the background. Returns one row per SNP: ``snp_id``,
-        ``maf`` (over all samples of ``genotype_path``), and for each
-        covariate ``c``:
-
-        - ``c_weight``: the SNP's weight in the polygenic score of ``c``;
-        - ``c_score``: mean over the attributed samples of
-          ``|weight * z|``, with ``z`` the genotype standardized as the
-          model does it: the exact SHAP value of the score alone, against
-          the mean genotype of the training samples;
-        - ``c_full``: mean ``|SHAP value|`` of the prediction of ``c`` by
-          expected gradients (``n_samples`` draws per sample), through
-          every path from the genotypes;
-        - ``c_direct`` and ``c_location``: mean ``|SHAP value|`` of its two
-          parts (network.path_attributions), the path through the score
-          (the score and the correction head's use of it) and the path
-          through the trunk and the predicted location. For each sample
-          the signed parts add up to the signed full value.
-
-        The values are in the units of the network's covariate output:
-        SDs of the covariate in the data given to ``fit()``, after its
-        transform (``cov_transforms``).
-        """
-        if not hasattr(self, "model_"):
-            raise RuntimeError("EcoLocator must be fitted before calling attribute")
-        if self.network_ != "pgs":
-            raise ValueError(
-                "attribute() needs the EcoLocator network; for a model of "
-                "the dense network (build_network), use shap_values()"
-            )
-        if self.num_covs_ == 0:
-            raise ValueError("the model has no covariates to attribute")
-        rng = np.random.default_rng(seed if seed is not None else self.seed_)
-
-        genotypes, samples, snp_ids = self._get_genotypes(genotype_path)
-        genotypes = genotypes[self._kept_snp_indices_, :, :]
-        gen = np.transpose(replace_missing_data(genotypes, rng=rng)).astype(np.float32)
-        _, locs = sort_samples(samples, sample_data_path)
-        unknown = np.isnan(locs[:, 0])
-        known = np.flatnonzero(~unknown)
-        if not unknown.any():
-            raise ValueError("no sample to attribute: none has missing x/y")
-        if len(known) == 0:
-            raise ValueError("no background samples: every sample has missing x/y")
-        background = gen[
-            rng.choice(known, min(background_size, len(known)), replace=False)
-        ]
-        x = gen[unknown]
-
-        direct, location = path_attributions(self.model_, x, background, n_samples, rng)
-        z = tf.keras.Model(
-            inputs=self.model_.input,
-            outputs=self.model_.get_layer("standardize").output,
-        )(x, training=False).numpy()
-        freq = gen.mean(axis=0) / 2
-        table = {
-            "snp_id": np.asarray(snp_ids)[self._kept_snp_indices_],
-            "maf": np.minimum(freq, 1 - freq),
-        }
-        for c, name in enumerate(self.cov_names_):
-            weight = self.model_.get_layer(f"score_{c}").get_weights()[0][:, 0]
-            table[f"{name}_weight"] = weight
-            table[f"{name}_score"] = np.abs(z * weight).mean(axis=0)
-            table[f"{name}_full"] = np.abs(direct[:, :, c] + location[:, :, c]).mean(
-                axis=0
-            )
-            table[f"{name}_direct"] = np.abs(direct[:, :, c]).mean(axis=0)
-            table[f"{name}_location"] = np.abs(location[:, :, c]).mean(axis=0)
-        return pd.DataFrame(table)
 
     def _get_genotypes(self, genotype_path: str):
         if genotype_path.endswith(".zarr"):

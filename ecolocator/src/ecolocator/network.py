@@ -124,7 +124,7 @@ def build_pgs_network(
 def _covariate_models(model: tf.keras.Model):
     """Two models of the covariate output of an EcoLocator network.
 
-    ``full`` is the network's own covariate output. ``direct`` computes the
+    ``full`` is the network's own covariate output. ``score_path`` computes the
     same values with the same layers, but the predicted location reaches the
     correction heads through an unconditional gradient stop, so its gradient
     leaves out the path through the trunk. Called with ``training=False``
@@ -140,11 +140,11 @@ def _covariate_models(model: tf.keras.Model):
         )
         correction = model.get_layer(f"correction_{j}")(hidden)
         covariates.append(tf.keras.layers.Add()([score, correction]))
-    direct = (
+    score_path = (
         covariates[0] if num_covs == 1 else tf.keras.layers.Concatenate()(covariates)
     )
     full = tf.keras.Model(inputs=model.input, outputs=model.outputs[1])
-    return full, tf.keras.Model(inputs=model.input, outputs=direct)
+    return full, tf.keras.Model(inputs=model.input, outputs=score_path)
 
 
 def path_attributions(
@@ -163,19 +163,19 @@ def path_attributions(
     ``background`` and a_k drawn from U(0, 1). Gradients add over the paths
     from the input to the output, so with the same draws for both parts:
 
-    - direct: the path through the scores, that is, the score itself and
+    - score: the path through the polygenic scores, that is, the score itself and
       the correction head's use of it;
     - location: the path through the trunk and the predicted location.
 
-    direct + location is the full SHAP value. Summed over SNPs, it tends to
+    score + location is the full SHAP value. Summed over SNPs, it tends to
     f_c(x_i) - mean_b f_c(b) as ``n_samples`` grows.
 
     x and background are genotype rows (0/1/2 counts, as the model takes
-    them). Returns (direct, location), each of shape (samples, SNPs,
+    them). Returns (score, location), each of shape (samples, SNPs,
     covariates), in the units of the model's covariate output."""
     if len(model.outputs) < 2:
         raise ValueError("the model has no covariate output to attribute")
-    full, direct = _covariate_models(model)
+    full, score_path = _covariate_models(model)
     num_covs = full.output.shape[-1]
 
     @tf.function(reduce_retracing=True)
@@ -185,16 +185,16 @@ def path_attributions(
         with tf.GradientTape(persistent=True) as tape:
             tape.watch(points)
             f_full = full(points, training=False)
-            f_direct = direct(points, training=False)
-            parts = [(f_full[:, c], f_direct[:, c]) for c in range(num_covs)]
+            f_score = score_path(points, training=False)
+            parts = [(f_full[:, c], f_score[:, c]) for c in range(num_covs)]
         g_full = [tape.gradient(f, points) for f, _ in parts]
-        g_direct = [tape.gradient(d, points) for _, d in parts]
-        return tf.stack(g_full), tf.stack(g_direct)
+        g_score = [tape.gradient(d, points) for _, d in parts]
+        return tf.stack(g_full), tf.stack(g_score)
 
     x = np.asarray(x, dtype=np.float32)
     background = np.asarray(background, dtype=np.float32)
     n, n_snps = x.shape
-    out_direct = np.empty((n, n_snps, num_covs), np.float32)
+    out_score = np.empty((n, n_snps, num_covs), np.float32)
     out_location = np.empty((n, n_snps, num_covs), np.float32)
     # Samples per batch: about 4 million genotype values of interpolation
     # points at a time.
@@ -204,13 +204,13 @@ def path_attributions(
         b = background[rng.integers(len(background), size=(len(xs), n_samples))]
         a = rng.random((len(xs), n_samples, 1), dtype=np.float32)
         diff = xs[:, None, :] - b
-        g_full, g_direct = gradients(tf.constant((b + a * diff).reshape(-1, n_snps)))
+        g_full, g_score = gradients(tf.constant((b + a * diff).reshape(-1, n_snps)))
         for c in range(num_covs):
             gf = g_full[c].numpy().reshape(diff.shape)
-            gd = g_direct[c].numpy().reshape(diff.shape)
-            out_direct[start : start + chunk, :, c] = (diff * gd).mean(axis=1)
-            out_location[start : start + chunk, :, c] = (diff * (gf - gd)).mean(axis=1)
-    return out_direct, out_location
+            gs = g_score[c].numpy().reshape(diff.shape)
+            out_score[start : start + chunk, :, c] = (diff * gs).mean(axis=1)
+            out_location[start : start + chunk, :, c] = (diff * (gf - gs)).mean(axis=1)
+    return out_score, out_location
 
 
 def build_network(

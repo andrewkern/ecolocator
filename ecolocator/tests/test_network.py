@@ -90,17 +90,17 @@ def test_pgs_save_load(tmp_path):
     )
 
 
-def test_direct_model_matches_full_output():
+def test_score_path_model_matches_full_output():
     """testing that the attribution models give the network's covariate output"""
     from ecolocator.network import _covariate_models
 
     for num_covs in (1, 3):
         model, G = _pgs(num_covs=num_covs)
-        full, direct = _covariate_models(model)
+        full, score_path = _covariate_models(model)
         expected = model(G, training=False)[1].numpy()
         np.testing.assert_allclose(full(G, training=False).numpy(), expected, atol=1e-6)
         np.testing.assert_allclose(
-            direct(G, training=False).numpy(), expected, atol=1e-6
+            score_path(G, training=False).numpy(), expected, atol=1e-6
         )
 
 
@@ -109,13 +109,13 @@ def test_path_attributions_are_complete():
     from ecolocator.network import path_attributions
 
     model, G = _pgs(num_covs=2)
-    direct, location = path_attributions(
+    score, location = path_attributions(
         model, G[:3], G[3:4], n_samples=2000, rng=np.random.default_rng(1)
     )
-    assert direct.shape == location.shape == (3, G.shape[1], 2)
+    assert score.shape == location.shape == (3, G.shape[1], 2)
     f = model(G, training=False)[1].numpy()
     np.testing.assert_allclose(
-        (direct + location).sum(axis=1), f[:3] - f[3], atol=0.02 * np.abs(f).max()
+        (score + location).sum(axis=1), f[:3] - f[3], atol=0.02 * np.abs(f).max()
     )
     assert np.abs(location).sum() > 0
 
@@ -130,8 +130,8 @@ def test_path_attributions_without_location_input():
         kernel, bias = head.get_weights()
         kernel[1:] = 0.0  # rows of the two location inputs
         head.set_weights([kernel, bias])
-    direct, location = path_attributions(
+    score, location = path_attributions(
         model, G[:3], G[3:8], n_samples=50, rng=np.random.default_rng(1)
     )
     np.testing.assert_allclose(location, 0.0, atol=1e-6)
-    assert np.abs(direct).sum() > 0
+    assert np.abs(score).sum() > 0

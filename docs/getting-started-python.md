@@ -121,22 +121,24 @@ shap_out = model.shap_values(
 )
 ```
 
-The covariate predictions can also be attributed split by the network's two
-paths: the polygenic score (and the correction head's use of it), and the
-predicted location. As for `shap_values`, samples with missing `x`/`y` are
-attributed and the others form the background:
+The result has one row per SNP and one column per output (`x`, `y`, and
+each covariate): the mean absolute SHAP value over the attributed samples.
+Covariate values are in SDs of the covariate, after its transform.
+
+`by_path=True` also splits each covariate's SHAP values by the network's two
+paths. Every covariate `<cov>` gets two more columns: `<cov>_score`, the
+part through the SNP's polygenic score (and the correction head's use of
+it), and `<cov>_location`, the part through the predicted location:
 
 ```python
-paths = model.attribute(
+shap_out = model.shap_values(
     genotype_path="./data/test_genotypes.vcf.gz",
     sample_data_path="./data/test_sample_data_cov.txt",
+    train_genotype_path="./data/test_genotypes.vcf.gz",
+    train_sample_data_path="./data/test_sample_data_cov.txt",
+    by_path=True,
 )
-paths[["snp_id", "maf", "cov1_full", "cov1_direct", "cov1_location"]]
+shap_out[["snp_id", "cov1", "cov1_score", "cov1_location"]]
 ```
-
-Each covariate has five columns: its score weight, and the mean absolute
-attribution of the score alone (`_score`), the whole prediction (`_full`),
-and its two paths (`_direct`, `_location`). The values are in SDs of the
-covariate, after its transform.
 
 See {doc}`api/index` for the full parameter list of each method.
