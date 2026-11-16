@@ -22,18 +22,36 @@ HYPERPARAMETERS = tuple(D)
 
 def _json_value(value):
     """A setting as JSON can store it: sequences (also NumPy arrays) as lists
-    of floats, NumPy scalars as Python numbers."""
+    of floats, NumPy scalars and 0-d arrays as Python numbers."""
+    if isinstance(value, np.ndarray) and value.ndim == 0:
+        return value.item()
     if isinstance(value, (list, tuple, np.ndarray)):
         return [float(v) for v in value]
     return value.item() if isinstance(value, np.generic) else value
 
 
-def _column_mean_sd(*blocks):
-    """Mean and SD of every column over the rows of all blocks together,
-    without copying the blocks into one array."""
+def _penalties(score_l2):
+    """score_l2 as a list of floats; raises ValueError unless it is one or
+    more finite numbers >= 0."""
+    try:
+        penalties = [float(p) for p in np.atleast_1d(score_l2)]
+    except (TypeError, ValueError):
+        penalties = []
+    if not penalties or not all(np.isfinite(p) and p >= 0 for p in penalties):
+        raise ValueError(
+            f"score_l2 must be one or more finite numbers >= 0, not {score_l2!r}"
+        )
+    return penalties
+
+
+def _column_mean_sd(*blocks, rows=1024):
+    """Mean and SD of every column over the rows of all blocks together.
+    Works through ``rows`` rows at a time, so that memory beyond the blocks
+    stays at a few float64 arrays of that many rows."""
     n = sum(len(b) for b in blocks)
-    mean = sum(b.sum(axis=0, dtype=float) for b in blocks) / n
-    var = sum(np.square(b - mean).sum(axis=0) for b in blocks) / n
+    chunks = [b[i : i + rows] for b in blocks for i in range(0, len(b), rows)]
+    mean = sum(c.sum(axis=0, dtype=float) for c in chunks) / n
+    var = sum(np.square(c - mean).sum(axis=0) for c in chunks) / n
     return mean, np.sqrt(var)
 
 
@@ -69,6 +87,7 @@ class EcoLocator:
         self.input_dropout = input_dropout
         self.weight_decay = weight_decay
         self.head_width = head_width
+        _penalties(score_l2)
         self.score_l2 = score_l2
         self.loc_weight = loc_weight
         self.env_weight = env_weight
@@ -152,11 +171,7 @@ class EcoLocator:
         seed: int = None,
         verbose: int = 1,
     ) -> "EcoLocator":
-        if self.network_ != "pgs":
-            raise ValueError(
-                "this model was saved with the dense network (build_network); "
-                "fit a new EcoLocator instead"
-            )
+        self._check_refittable()
         rng = np.random.default_rng(seed)
 
         genotypes, samples, _ = self._get_genotypes(genotype_path)
@@ -245,13 +260,7 @@ class EcoLocator:
                 "stopping and the penalty search need them"
             )
         geno_mean, geno_sd = _column_mean_sd(traingen, testgen)
-        penalties = (
-            [0.0] if num_covs == 0 else [float(p) for p in np.atleast_1d(self.score_l2)]
-        )
-        if not penalties or not all(np.isfinite(p) and p >= 0 for p in penalties):
-            raise ValueError(
-                f"score_l2 must be one or more finite numbers >= 0, not {self.score_l2!r}"
-            )
+        penalties = [0.0] if num_covs == 0 else _penalties(self.score_l2)
         settings = {k: getattr(self, k) for k in HYPERPARAMETERS if k != "score_l2"}
         best, losses = None, {}
         for penalty in penalties:
@@ -360,6 +369,7 @@ class EcoLocator:
         ``snp_ids`` (n_snps), ``outputs`` (x, y, then covariates), and
         ``values`` (n_folds x n_snps x n_outputs).
         """
+        self._check_refittable()
         rng = np.random.default_rng(seed)
         genotypes, samples, all_snp_ids = self._get_genotypes(genotype_path)
         sample_data, locs = sort_samples(samples, sample_data_path)
@@ -662,6 +672,15 @@ class EcoLocator:
                     env_location[:, :, var_idx - 2]
                 ).mean(axis=0)
         return pd.DataFrame(summary)
+
+    def _check_refittable(self):
+        """fit() and fit_predict_loo() build the EcoLocator network; a model
+        loaded from the dense network (build_network) cannot be refitted."""
+        if self.network_ != "pgs":
+            raise ValueError(
+                "this model was saved with the dense network (build_network); "
+                "fit a new EcoLocator instead"
+            )
 
     def _get_genotypes(self, genotype_path: str):
         if genotype_path.endswith(".zarr"):

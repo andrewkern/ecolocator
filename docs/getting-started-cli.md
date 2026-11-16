@@ -88,8 +88,8 @@ ecolocator loo \
     --out out/loo_predictions.tsv
 ```
 
-The output has one row per fold: `sampleID`, `x`, `y`, the covariates, and
-`score_l2`, the penalty that fold chose.
+The output has one row per fold: `sampleID`, `x`, `y`, and, with
+covariates, the covariates and `fold_score_l2`, the penalty that fold chose.
 
 Use `--max-folds N` to run only the first N folds, useful for a quick
 smoke-test before committing to a full run. All training hyperparameter flags
