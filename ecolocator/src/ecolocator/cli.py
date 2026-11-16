@@ -5,6 +5,11 @@ from typing import Annotated, Optional
 
 import typer
 
+from .settings import NETWORK_DEFAULTS as D
+
+# The default penalty grid as the command line takes it: "20,60,200,600".
+SCORE_L2_DEFAULT = ",".join(f"{v:g}" for v in D["score_l2"])
+
 
 app = typer.Typer(
     add_completion=False,
@@ -41,15 +46,15 @@ EnvWeight = Annotated[
 
 
 def _make_model(cov_transforms: Optional[str], score_l2: str, **settings):
-    """An EcoLocator from the command-line options."""
+    """An EcoLocator from the command-line options. score_l2 is a
+    comma-separated list; one value fixes the penalty."""
     from .ecolocator_class import EcoLocator
 
-    penalties = tuple(float(v) for v in score_l2.split(","))
     return EcoLocator(
         cov_transforms=[t.strip() for t in cov_transforms.split(",")]
         if cov_transforms
         else None,
-        score_l2=penalties[0] if len(penalties) == 1 else penalties,
+        score_l2=tuple(float(v) for v in score_l2.split(",")),
         **settings,
     )
 
@@ -80,15 +85,15 @@ def train(
         file_okay=False,
         help="Directory to save the fitted model (model.keras, arrays.npz, params.json).",
     ),
-    nlayers: NLayers = 4,
-    width: Width = 128,
-    dropout_prop: DropoutProp = 0.25,
-    input_dropout: InputDropout = 0.1,
-    weight_decay: WeightDecay = 2e-4,
-    head_width: HeadWidth = 16,
-    score_l2: ScoreL2 = "20,60,200,600",
-    loc_weight: LocWeight = 1.0,
-    env_weight: EnvWeight = 1.0,
+    nlayers: NLayers = D["nlayers"],
+    width: Width = D["width"],
+    dropout_prop: DropoutProp = D["dropout_prop"],
+    input_dropout: InputDropout = D["input_dropout"],
+    weight_decay: WeightDecay = D["weight_decay"],
+    head_width: HeadWidth = D["head_width"],
+    score_l2: ScoreL2 = SCORE_L2_DEFAULT,
+    loc_weight: LocWeight = D["loc_weight"],
+    env_weight: EnvWeight = D["env_weight"],
     cov_transforms: Optional[str] = typer.Option(
         None,
         help="Comma-separated per-covariate transforms (e.g. 'none,log,log'). Valid: none, log.",
@@ -236,15 +241,15 @@ def loo(
     shap_background_size: int = typer.Option(
         100, help="Training samples used as the SHAP background in each fold."
     ),
-    nlayers: NLayers = 4,
-    width: Width = 128,
-    dropout_prop: DropoutProp = 0.25,
-    input_dropout: InputDropout = 0.1,
-    weight_decay: WeightDecay = 2e-4,
-    head_width: HeadWidth = 16,
-    score_l2: ScoreL2 = "20,60,200,600",
-    loc_weight: LocWeight = 1.0,
-    env_weight: EnvWeight = 1.0,
+    nlayers: NLayers = D["nlayers"],
+    width: Width = D["width"],
+    dropout_prop: DropoutProp = D["dropout_prop"],
+    input_dropout: InputDropout = D["input_dropout"],
+    weight_decay: WeightDecay = D["weight_decay"],
+    head_width: HeadWidth = D["head_width"],
+    score_l2: ScoreL2 = SCORE_L2_DEFAULT,
+    loc_weight: LocWeight = D["loc_weight"],
+    env_weight: EnvWeight = D["env_weight"],
     cov_transforms: Optional[str] = typer.Option(
         None,
         help="Comma-separated per-covariate transforms (e.g. 'none,log,log'). Valid: none, log.",
