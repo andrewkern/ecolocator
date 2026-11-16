@@ -90,18 +90,17 @@ def test_pgs_save_load(tmp_path):
     )
 
 
-def test_score_path_model_matches_full_output():
-    """testing that the attribution models give the network's covariate output"""
-    from ecolocator.network import _covariate_models
+def test_attribution_model_matches_network_output():
+    """testing that both outputs of the attribution model equal the network's covariate output"""
+    from ecolocator.network import _attribution_model
 
     for num_covs in (1, 3):
         model, G = _pgs(num_covs=num_covs)
-        full, score_path = _covariate_models(model)
+        full, score_path = _attribution_model(model)(G, training=False)
         expected = model(G, training=False)[1].numpy()
-        np.testing.assert_allclose(full(G, training=False).numpy(), expected, atol=1e-6)
-        np.testing.assert_allclose(
-            score_path(G, training=False).numpy(), expected, atol=1e-6
-        )
+        np.testing.assert_allclose(full.numpy(), expected, atol=1e-6)
+        np.testing.assert_allclose(score_path.numpy(), expected, atol=1e-6)
+        assert _attribution_model(model) is _attribution_model(model)
 
 
 def test_path_attributions_are_complete():
@@ -135,3 +134,22 @@ def test_path_attributions_without_location_input():
     )
     np.testing.assert_allclose(location, 0.0, atol=1e-6)
     assert np.abs(score).sum() > 0
+
+
+def test_path_attributions_in_small_batches():
+    """testing that splitting the draws of one sample into batches keeps completeness"""
+    from ecolocator.network import path_attributions
+
+    model, G = _pgs(num_covs=2)
+    score, location = path_attributions(
+        model,
+        G[:2],
+        G[3:4],
+        n_samples=2000,
+        rng=np.random.default_rng(1),
+        batch_values=G.shape[1] * 300,
+    )
+    f = model(G, training=False)[1].numpy()
+    np.testing.assert_allclose(
+        (score + location).sum(axis=1), f[:2] - f[3], atol=0.02 * np.abs(f).max()
+    )

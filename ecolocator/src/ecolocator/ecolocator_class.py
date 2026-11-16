@@ -55,6 +55,25 @@ def _column_mean_sd(*blocks, rows=1024):
     return mean, np.sqrt(var)
 
 
+def _shap_summary_table(values: dict) -> pd.DataFrame:
+    """One row per SNP: ``snp_id`` and the mean absolute SHAP value of each
+    output over the attributed samples."""
+    means = np.abs(values["values"]).mean(axis=0)
+    return pd.DataFrame(
+        {"snp_id": values["snp_ids"], **dict(zip(values["names"], means.T))}
+    )
+
+
+def _shap_raw_table(values: dict) -> pd.DataFrame:
+    """One row per attributed sample: ``sampleID`` and one column per SNP and
+    output (``<snp_id>_<output>``), signed."""
+    v = values["values"]
+    columns = [f"{snp}_{name}" for snp in values["snp_ids"] for name in values["names"]]
+    table = pd.DataFrame(v.reshape(len(v), -1), columns=columns)
+    table.insert(0, "sampleID", values["sample_ids"])
+    return table
+
+
 class EcoLocator:
     """
     A neural network model for predicting sample locations and environmental
@@ -556,6 +575,33 @@ class EcoLocator:
         sample the signed parts add up to the signed value of ``c``
         (network.path_attributions).
         """
+        values = self._shap_outputs(
+            genotype_path,
+            sample_data_path,
+            train_genotype_path,
+            train_sample_data_path,
+            background_size=background_size,
+            min_maf=min_maf,
+            seed=seed,
+            by_path=by_path,
+        )
+        return _shap_raw_table(values) if raw else _shap_summary_table(values)
+
+    def _shap_outputs(
+        self,
+        genotype_path,
+        sample_data_path,
+        train_genotype_path,
+        train_sample_data_path,
+        *,
+        background_size,
+        min_maf,
+        seed,
+        by_path,
+    ) -> dict:
+        """The signed SHAP values of shap_values(): a dict with
+        ``sample_ids``, ``snp_ids``, ``names`` (the output columns, in table
+        order), and ``values`` (samples x SNPs x outputs)."""
         import shap
 
         if not hasattr(self, "model_"):
@@ -631,47 +677,26 @@ class EcoLocator:
                 env_score = env_score[:, mask, :]
                 env_location = env_location[:, mask, :]
 
-        n_samples = predgen.shape[0]
-        if n_samples == 1:
+        if predgen.shape[0] == 1:
             logging.warning(
                 "Attributing 1 sample — output is absolute SHAP values "
                 "for that sample, not a mean across multiple samples."
             )
 
-        if raw:
-            rows = []
-            for k, sample in enumerate(pred_samples[unknown]):
-                row = {"sampleID": sample}
-                for col_idx, snp_id in enumerate(snp_ids):
-                    row[f"{snp_id}_x"] = shap_loc[k, col_idx, 0]
-                    row[f"{snp_id}_y"] = shap_loc[k, col_idx, 1]
-                    for j, cov in enumerate(self.cov_names_):
-                        row[f"{snp_id}_{cov}"] = shap_env[k, col_idx, j]
-                        if by_path:
-                            row[f"{snp_id}_{cov}_score"] = env_score[k, col_idx, j]
-                            row[f"{snp_id}_{cov}_location"] = env_location[
-                                k, col_idx, j
-                            ]
-                rows.append(row)
-            return pd.DataFrame(rows)
-
-        # default: mean absolute SHAP summary — rows=SNPs, cols=output variables
-        output_cols = ["x", "y"] + self.cov_names_
-        summary = {"snp_id": snp_ids}
-        for var_idx, var in enumerate(output_cols):
-            if var_idx < 2:
-                vals = shap_loc[:, :, var_idx]  # shape (n_samples, n_snps)
-            else:
-                vals = shap_env[:, :, var_idx - 2]
-            summary[var] = np.abs(vals).mean(axis=0)
-            if by_path and var_idx >= 2:
-                summary[f"{var}_score"] = np.abs(env_score[:, :, var_idx - 2]).mean(
-                    axis=0
-                )
-                summary[f"{var}_location"] = np.abs(
-                    env_location[:, :, var_idx - 2]
-                ).mean(axis=0)
-        return pd.DataFrame(summary)
+        outputs = [shap_loc[:, :, 0], shap_loc[:, :, 1]]
+        names = ["x", "y"]
+        for j, cov in enumerate(self.cov_names_):
+            outputs.append(shap_env[:, :, j])
+            names.append(cov)
+            if by_path:
+                outputs += [env_score[:, :, j], env_location[:, :, j]]
+                names += [f"{cov}_score", f"{cov}_location"]
+        return {
+            "sample_ids": pred_samples[unknown],
+            "snp_ids": snp_ids,
+            "names": names,
+            "values": np.stack(outputs, axis=-1),
+        }
 
     def _check_refittable(self):
         """fit() and fit_predict_loo() build the EcoLocator network; a model

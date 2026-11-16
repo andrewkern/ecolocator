@@ -386,39 +386,29 @@ def attribute(
     ),
 ) -> None:
     """Attribute SNP importance for samples with unknown coordinates using SHAP."""
-    from .ecolocator_class import EcoLocator
+    from .ecolocator_class import EcoLocator, _shap_raw_table, _shap_summary_table
 
     el = EcoLocator.load(str(model))
     out.parent.mkdir(parents=True, exist_ok=True)
-
-    result = el.shap_values(
-        genotype_path=str(genotypes),
-        sample_data_path=str(sample_data),
-        train_genotype_path=str(genotypes),
-        train_sample_data_path=str(sample_data),
+    # One computation for both tables, so that the summary is the mean
+    # absolute value of the raw table.
+    values = el._shap_outputs(
+        str(genotypes),
+        str(sample_data),
+        str(genotypes),
+        str(sample_data),
         background_size=background_size,
         min_maf=min_maf,
         seed=seed,
-        raw=False,
         by_path=by_path,
     )
+    result = _shap_summary_table(values)
     result.to_csv(out, sep="\t", index=False)
     typer.echo(f"Attributed {len(result)} SNPs → {out}")
 
     if save_raw:
-        raw_result = el.shap_values(
-            genotype_path=str(genotypes),
-            sample_data_path=str(sample_data),
-            train_genotype_path=str(genotypes),
-            train_sample_data_path=str(sample_data),
-            background_size=background_size,
-            min_maf=min_maf,
-            seed=seed,
-            raw=True,
-            by_path=by_path,
-        )
         raw_out = out.with_stem(out.stem + "_raw")
-        raw_result.to_csv(raw_out, sep="\t", index=False)
+        _shap_raw_table(values).to_csv(raw_out, sep="\t", index=False)
         typer.echo(f"Raw SHAP values → {raw_out}")
 
 

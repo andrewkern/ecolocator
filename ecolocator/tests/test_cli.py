@@ -27,7 +27,13 @@ def test_attribute_by_path(example_data, tmp_path):
     table = pd.read_csv(tmp_path / "a.tsv", sep="\t")
     for c in ("cov1", "cov2", "cov3"):
         assert {c, f"{c}_score", f"{c}_location"} <= set(table)
-    assert (tmp_path / "a_raw.tsv").exists()
+    # The summary is the mean absolute value of the raw table.
+    raw = pd.read_csv(tmp_path / "a_raw.tsv", sep="\t")
+    snp = table.snp_id.iloc[0]
+    for c in ("x", "cov1", "cov2_score", "cov3_location"):
+        np.testing.assert_allclose(
+            raw[f"{snp}_{c}"].abs().mean(), table[c].iloc[0], rtol=1e-5
+        )
 
 
 def test_bad_score_l2_is_a_usage_error(example_data, tmp_path):
