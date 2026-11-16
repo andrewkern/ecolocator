@@ -61,9 +61,9 @@ def build_pgs_network(
     heads) are multiplied by the loss weight of their output, so the loss
     weights set only the balance between location and covariates. The
     covariate loss is the mean squared error over the K covariates, so each
-    covariate's error enters it with weight 1/K while its score keeps the
-    full penalty: relative to that covariate's own error, the penalty is
-    K * score_l2. The default penalty grid is tuned with this scaling.
+    covariate's error enters it with weight 1/K. Each score's penalty is
+    divided by K too, so that relative to its covariate's own error the
+    penalty is ``score_l2`` for any number of covariates.
     """
     loc_reg = tf.keras.regularizers.l2(weight_decay * loc_weight)
     env_reg = tf.keras.regularizers.l2(weight_decay * env_weight)
@@ -90,14 +90,15 @@ def build_pgs_network(
 
     location = StopGradient(name="stop_location")(loc_output)
     covariates = []
-    # TODO: consider dividing the score penalty by num_covs, so that
-    # score_l2 means the same penalty per covariate for any number of
-    # covariates (see the docstring); the default grid would need retuning.
     for j in range(num_covs):
+        # Divided by num_covs: the covariate MSE gives each covariate's error
+        # weight 1/num_covs, and the penalty scales the same way.
         score = tf.keras.layers.Dense(
             1,
             use_bias=False,
-            kernel_regularizer=tf.keras.regularizers.l2(score_l2 * env_weight),
+            kernel_regularizer=tf.keras.regularizers.l2(
+                score_l2 * env_weight / num_covs
+            ),
             name=f"score_{j}",
         )(z)
         hidden = tf.keras.layers.Dense(
