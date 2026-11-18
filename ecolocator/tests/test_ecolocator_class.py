@@ -912,3 +912,19 @@ def test_column_mean_sd_in_row_chunks():
     both = np.vstack([a, b]).astype(float)
     np.testing.assert_allclose(mean, both.mean(axis=0))
     np.testing.assert_allclose(sd, both.std(axis=0))
+
+
+def test_shap_values_by_path_with_min_maf(example_data, tmp_path):
+    """testing that min_maf with by_path keeps the same values for the SNPs it keeps"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = _fit_small(matrix_path, sample_data_path)
+    masked = str(_masked(sample_data_path, tmp_path))
+    args = (str(matrix_path), masked, str(matrix_path), masked)
+    full = model.shap_values(*args, by_path=True, seed=3)
+    kept = model.shap_values(*args, by_path=True, seed=3, min_maf=0.25)
+    assert list(kept.columns) == list(full.columns)
+    assert 0 < len(kept) < len(full)
+    pd.testing.assert_frame_equal(
+        kept.reset_index(drop=True),
+        full[full.snp_id.isin(kept.snp_id)].reset_index(drop=True),
+    )

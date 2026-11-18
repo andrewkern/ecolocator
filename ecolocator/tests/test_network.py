@@ -167,3 +167,28 @@ def test_pgs_score_l2_penalty_independent_of_num_covs():
             model.get_layer("score_0").losses[0].numpy() * num_covs
         )
     np.testing.assert_allclose(scaled_losses[1], scaled_losses[3])
+
+
+def test_path_attributions_match_gradient_explainer():
+    """testing that the two parts add up to shap.GradientExplainer's SHAP values"""
+    import shap
+    import tensorflow as tf
+    from ecolocator.network import path_attributions
+
+    model, G = _pgs(num_covs=2)
+    x, background = G[:5], G[10:11]
+    # One background row: both methods then estimate the same integral along
+    # the line from it to each sample, and agree up to their random draws.
+    score, location = path_attributions(
+        model, x, background, n_samples=4000, rng=np.random.default_rng(1)
+    )
+    env = tf.keras.Model(inputs=model.input, outputs=model.outputs[1])
+    expected = shap.GradientExplainer(env, background).shap_values(
+        x, nsamples=4000, rseed=1
+    )
+    if isinstance(expected, list):  # older shap: one array per output
+        expected = np.stack(expected, axis=-1)
+    expected = np.asarray(expected).reshape(score.shape)
+    np.testing.assert_allclose(
+        score + location, expected, atol=0.02 * np.abs(expected).max()
+    )
