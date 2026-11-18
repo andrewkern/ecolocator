@@ -19,6 +19,7 @@ Subcommands:
 - `ecolocator predict` — predict locations and covariates for samples with unknown coordinates, using a saved model.
 - `ecolocator loo` — leave-one-out cross-validation: iteratively hold out each sample, train, and predict.
 - `ecolocator attribute` — attribute SNP importance for predicted samples using SHAP.
+- `ecolocator gea` — location-corrected genotype-environment association: each SNP against each environmental variable, corrected for population structure by the predicted locations.
 
 ---
 
@@ -191,4 +192,40 @@ paths. Every covariate column `<cov>` then has two more columns next to it:
 `<cov>_location`, the part through the predicted location. For each sample
 the two parts add up to the value in `<cov>`; the summary holds mean
 absolute values, as for every column.
+
+---
+
+## `ecolocator gea`
+
+Tests every SNP against every environmental variable with a correction for
+population structure: for SNP j and variable e, a least-squares fit of
+`g_j = b0 + b_e * env_e + f(x_hat, y_hat)`, where `f` is a smooth 2-D spline
+of each sample's **predicted** location. The predicted location summarizes
+what the genotypes say about origin, which is population structure; the true
+location would also carry the environment. Each sample's location must come
+from a model that did not see it, such as the output of `ecolocator loo`:
+
+```bash
+ecolocator loo -g data/genotypes.tsv -s data/samples.tsv -o out/loo.tsv
+ecolocator gea \
+    --genotypes data/genotypes.tsv \
+    --sample-data data/samples.tsv \
+    --locations out/loo.tsv \
+    --env cov1 \
+    --out out/gea.tsv
+```
+
+`--locations` needs `sampleID`, `x`, and `y`; `--env` names the variables to
+test (default: every column of the sample data but `sampleID`, `x`, `y`).
+The output has one row per SNP and variable: `snp_id`, `env`, `maf`, `beta`,
+`se`, `z`, `z_cal` (z divided by the square root of the genomic inflation
+factor, as in LFMM2), `p`, `neglog10_p`, and Benjamini-Hochberg `q`.
+`<out-stem>_summary.tsv` gives, per variable, the samples and knots used, the
+SNPs tested, the inflation factor, and the hits at q < 0.05 and q < 0.1.
+
+The inflation factor comes from the tested SNPs. Population structure
+inflates the test more for common than for rare SNPs, so test the SNPs whose
+results you use: `--min-maf` (default 0.05) and `--min-mac` (default 2) set
+that set. `--n-knots` (default 5) sets the spline's knots per axis; fewer
+are used when there are fewer than 10 samples per basis function.
 

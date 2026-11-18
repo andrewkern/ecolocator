@@ -403,6 +403,93 @@ def loo(
 
 
 @app.command()
+def gea(
+    genotypes: Path = typer.Option(
+        ...,
+        "--genotypes",
+        "-g",
+        exists=True,
+        readable=True,
+        help="Genotype input: .vcf, .vcf.gz, .zarr, or dosage-matrix TSV.",
+    ),
+    sample_data: Path = typer.Option(
+        ...,
+        "--sample-data",
+        "-s",
+        exists=True,
+        readable=True,
+        dir_okay=False,
+        help="Sample metadata TSV with sampleID and the environmental variables.",
+    ),
+    locations: Path = typer.Option(
+        ...,
+        "--locations",
+        "-l",
+        exists=True,
+        readable=True,
+        dir_okay=False,
+        help=(
+            "TSV with sampleID, x, y: each sample's location predicted by a model "
+            "that did not see it, for example the output of `ecolocator loo`."
+        ),
+    ),
+    out: Path = typer.Option(
+        ...,
+        "--out",
+        "-o",
+        dir_okay=False,
+        help="Output TSV: one row per SNP and variable.",
+    ),
+    env: Optional[str] = typer.Option(
+        None,
+        help=(
+            "Comma-separated environmental variables to test "
+            "(default: every column of the sample data but sampleID, x, y)."
+        ),
+    ),
+    n_knots: int = typer.Option(
+        5, help="Knots per axis of the spline of the predicted location."
+    ),
+    min_mac: int = typer.Option(
+        2, help="Test SNPs with at least this minor-allele count."
+    ),
+    min_maf: float = typer.Option(
+        0.05,
+        help=(
+            "Test SNPs with at least this minor-allele frequency; the "
+            "calibration (GIF) comes from the tested SNPs."
+        ),
+    ),
+) -> None:
+    """Location-corrected GEA: each SNP against each environmental variable,
+    with a spline of the predicted location as the correction for population
+    structure. Also writes <out-stem>_summary.tsv (one row per variable)."""
+    from .gea import run_corrected_gea
+
+    names = [e.strip() for e in env.split(",")] if env else None
+    try:
+        results, summary = run_corrected_gea(
+            str(genotypes),
+            str(sample_data),
+            str(locations),
+            env_names=names,
+            n_knots=n_knots,
+            min_mac=min_mac,
+            min_maf=min_maf,
+        )
+    except ValueError as e:
+        raise typer.BadParameter(str(e))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    results.to_csv(out, sep="\t", index=False)
+    summary_out = out.with_stem(out.stem + "_summary")
+    summary.to_csv(summary_out, sep="\t", index=False)
+    typer.echo(
+        f"Tested {summary.n_snps.iloc[0]} SNPs x {len(summary)} variables → {out}"
+    )
+    typer.echo(f"Summary (GIF, hits per variable) → {summary_out}")
+
+
+@app.command()
 def attribute(
     model: Path = typer.Option(
         ...,

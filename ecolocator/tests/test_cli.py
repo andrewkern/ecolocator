@@ -165,3 +165,46 @@ def test_offset_writes_one_row_per_sample_and_site(example_data_30, tmp_path):
     off = pd.read_csv(out, sep="\t")
     assert len(off) == 60
     assert set(off.site) == {"a", "b"}
+
+
+def test_gea_writes_results_and_summary(tmp_path):
+    """testing that `ecolocator gea` writes one row per SNP and a summary per variable"""
+    rng = np.random.default_rng(0)
+    n, p = 300, 20
+    xy = rng.uniform(0, 5, size=(n, 2))
+    ids = [f"s{i}" for i in range(n)]
+    g = pd.DataFrame(
+        rng.binomial(2, 0.3, size=(n, p)), columns=[f"v{j}" for j in range(p)]
+    )
+    g.insert(0, "sampleID", ids)
+    g.to_csv(tmp_path / "g.tsv", sep="\t", index=False)
+    pd.DataFrame(
+        {
+            "sampleID": ids,
+            "x": xy[:, 0],
+            "y": xy[:, 1],
+            "a": rng.normal(size=n),
+            "b": rng.normal(size=n),
+        }
+    ).to_csv(tmp_path / "s.tsv", sep="\t", index=False)
+    pd.DataFrame({"sampleID": ids, "x": xy[:, 0], "y": xy[:, 1]}).to_csv(
+        tmp_path / "loc.tsv", sep="\t", index=False
+    )
+    args = ["gea", "-g", str(tmp_path / "g.tsv"), "-s", str(tmp_path / "s.tsv")]
+    args += [
+        "-l",
+        str(tmp_path / "loc.tsv"),
+        "-o",
+        str(tmp_path / "gea.tsv"),
+        "--env",
+        "a",
+    ]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    out = pd.read_csv(tmp_path / "gea.tsv", sep="\t")
+    assert set(out.env) == {"a"} and len(out) == p
+    summary = pd.read_csv(tmp_path / "gea_summary.tsv", sep="\t")
+    assert list(summary.env) == ["a"]
+    bad = CliRunner().invoke(app, [*args[:-1], "nope"])
+    assert bad.exit_code == 2
+    assert "nope" in re.sub(r"\x1b\[[0-9;]*m", "", bad.output)

@@ -168,6 +168,34 @@ Each fold searches the `score_l2` grid as `fit()` does; the penalty each
 fold chose is in `model.loo_score_l2_`. For a cheaper LOO, fix `score_l2`
 to one number, for example the penalty that `fit()` chose on all samples.
 
+## Location-corrected GEA
+
+`ecolocator.gea.corrected_gea` tests every SNP against every environmental
+variable, with a spline of the predicted location as the correction for
+population structure. The locations must come from models that did not see
+the samples, for example `fit_predict_loo`:
+
+```python
+from ecolocator.gea import run_corrected_gea
+
+loo = model.fit_predict_loo(
+    genotype_path="./data/test_genotypes.vcf.gz",
+    sample_data_path="./data/test_sample_data_cov.txt",
+)
+loo.to_csv("loo.tsv", sep="\t", index=False)
+results, summary = run_corrected_gea(
+    "./data/test_genotypes.vcf.gz",
+    "./data/test_sample_data_cov.txt",
+    "loo.tsv",
+    env_names=["cov1"],
+)
+```
+
+`results` has one row per SNP and variable (effect, z, calibrated z, p, and
+Benjamini-Hochberg q); `summary` has one row per variable (the inflation
+factor and the number of hits). `corrected_gea` takes arrays instead of
+files.
+
 ## SHAP feature attribution
 
 ```python

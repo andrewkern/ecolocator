@@ -15,6 +15,7 @@ dependencies = [
 	"scikit-allel",
 	"matplotlib",
 	"scipy",
+	"scikit-learn>=1.0",
 	"tqdm",
 	"pandas",
 	"zarr<3",

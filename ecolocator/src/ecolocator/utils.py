@@ -97,6 +97,17 @@ def load_genotypes(
     return genotypes, samples, snp_ids
 
 
+def read_genotypes(genotype_path: str):
+    """load_genotypes for a path, by its extension: .zarr, .vcf or .vcf.gz,
+    otherwise a dosage-matrix TSV."""
+    path = str(genotype_path)
+    if path.endswith(".zarr"):
+        return load_genotypes(zarr_path=path)
+    if path.endswith((".vcf", ".vcf.gz")):
+        return load_genotypes(vcf_path=path)
+    return load_genotypes(matrix_path=path)
+
+
 def sort_samples(
     samples: np.ndarray,
     sample_data_path: str,
