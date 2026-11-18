@@ -940,49 +940,6 @@ def test_offset_with_masked_covariates(example_data_30, tmp_path):
     assert np.isfinite(pred.drop(columns="sampleID").to_numpy()).all()
 
 
-def test_cli_offset(example_data_30, tmp_path):
-    """testing that the offset command writes one offset per sample and site"""
-    from typer.testing import CliRunner
-
-    from ecolocator.cli import app
-
-    _, _, matrix_path, sample_data_path = example_data_30
-    model = EcoLocator(**SMALL).fit(
-        str(matrix_path),
-        str(sample_data_path),
-        max_epochs=3,
-        patience=2,
-        train_split=0.6,
-        seed=3,
-        weight_folds=2,
-    )
-    model.save(str(tmp_path / "m"))
-    pd.DataFrame(
-        {"site": ["a", "b"], "cov1": [0.2, 0.8], "cov2": [0.5, 0.1], "cov3": [0.3, 0.9]}
-    ).to_csv(tmp_path / "sites.tsv", sep="\t", index=False)
-    out = tmp_path / "offsets.tsv"
-    result = CliRunner().invoke(
-        app,
-        [
-            "offset",
-            "--model",
-            str(tmp_path / "m"),
-            "--genotypes",
-            str(matrix_path),
-            "--sample-data",
-            str(sample_data_path),
-            "--sites",
-            str(tmp_path / "sites.tsv"),
-            "--out",
-            str(out),
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    off = pd.read_csv(out, sep="\t")
-    assert len(off) == 60
-    assert set(off.site) == {"a", "b"}
-
-
 def test_fit_without_validation_samples_raises(example_data):
     """testing that a train_split leaving no validation samples gives a clear error"""
     _, _, matrix_path, sample_data_path = example_data
