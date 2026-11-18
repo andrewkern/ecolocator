@@ -1040,6 +1040,82 @@ def test_offset_checks_site_values(example_data_30, tmp_path):
         model.offset(str(matrix_path), str(sample_data_path), sites)
 
 
+def _fit_small(matrix_path, sample_data_path, **kwargs):
+    return EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=5,
+        patience=3,
+        train_split=0.6,
+        min_mac=1,
+        seed=1,
+        **kwargs,
+    )
+
+
+def test_shap_values_by_path(example_data, tmp_path):
+    """testing that by_path adds a score and a location column after each covariate"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = _fit_small(matrix_path, sample_data_path)
+    masked = str(_masked(sample_data_path, tmp_path))
+    args = (str(matrix_path), masked, str(matrix_path), masked)
+    result = model.shap_values(*args, by_path=True)
+    covs = [f"{c}{p}" for c in model.cov_names_ for p in ("", "_score", "_location")]
+    assert list(result.columns) == ["snp_id", "x", "y"] + covs
+    assert len(result) == len(model._kept_snp_indices_)
+    for c in model.cov_names_:
+        # Mean absolute values: the whole is at most the sum of its parts.
+        assert (
+            result[c] <= result[f"{c}_score"] + result[f"{c}_location"] + 1e-6
+        ).all()
+    pd.testing.assert_frame_equal(result, model.shap_values(*args, by_path=True))
+    raw = model.shap_values(*args, by_path=True, raw=True)
+    snp, cov = result.snp_id.iloc[0], model.cov_names_[0]
+    np.testing.assert_allclose(
+        raw[f"{snp}_{cov}"],
+        raw[f"{snp}_{cov}_score"] + raw[f"{snp}_{cov}_location"],
+        atol=1e-6,
+    )
+
+
+def test_shap_values_by_path_after_load(tmp_path, example_data):
+    """testing that a model saves after by_path SHAP values and gives the same ones loaded"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = _fit_small(matrix_path, sample_data_path)
+    masked = str(_masked(sample_data_path, tmp_path))
+    args = (str(matrix_path), masked, str(matrix_path), masked)
+    expected = model.shap_values(*args, by_path=True, seed=3)
+    model.save(str(tmp_path / "m"))
+    loaded = EcoLocator.load(str(tmp_path / "m"))
+    pd.testing.assert_frame_equal(
+        loaded.shap_values(*args, by_path=True, seed=3), expected, atol=1e-5
+    )
+    pd.testing.assert_frame_equal(
+        loaded.predict(str(matrix_path), masked),
+        model.predict(str(matrix_path), masked),
+        atol=1e-5,
+    )
+
+
+def test_shap_values_by_path_checks(example_data, no_covariate_data, tmp_path):
+    """testing that by_path refuses the dense network and models without covariates"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = _fit_small(matrix_path, sample_data_path)
+    masked = str(_masked(sample_data_path, tmp_path))
+    model.network_ = "dense"
+    with pytest.raises(ValueError, match="by_path"):
+        model.shap_values(
+            str(matrix_path), masked, str(matrix_path), masked, by_path=True
+        )
+    matrix_path, sample_data_path = no_covariate_data
+    model = _fit_small(matrix_path, sample_data_path)
+    masked = str(_masked(sample_data_path, tmp_path))
+    with pytest.raises(ValueError, match="by_path"):
+        model.shap_values(
+            str(matrix_path), masked, str(matrix_path), masked, by_path=True
+        )
+
+
 def test_invalid_score_l2_raises_at_construction():
     """testing that a bad penalty is refused when the model is made, with or without covariates"""
     for bad in ((), (-1.0,), float("inf"), "abc"):
@@ -1072,3 +1148,19 @@ def test_column_mean_sd_in_row_chunks():
     both = np.vstack([a, b]).astype(float)
     np.testing.assert_allclose(mean, both.mean(axis=0))
     np.testing.assert_allclose(sd, both.std(axis=0))
+
+
+def test_shap_values_by_path_with_min_maf(example_data, tmp_path):
+    """testing that min_maf with by_path keeps the same values for the SNPs it keeps"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = _fit_small(matrix_path, sample_data_path)
+    masked = str(_masked(sample_data_path, tmp_path))
+    args = (str(matrix_path), masked, str(matrix_path), masked)
+    full = model.shap_values(*args, by_path=True, seed=3)
+    kept = model.shap_values(*args, by_path=True, seed=3, min_maf=0.25)
+    assert list(kept.columns) == list(full.columns)
+    assert 0 < len(kept) < len(full)
+    pd.testing.assert_frame_equal(
+        kept.reset_index(drop=True),
+        full[full.snp_id.isin(kept.snp_id)].reset_index(drop=True),
+    )

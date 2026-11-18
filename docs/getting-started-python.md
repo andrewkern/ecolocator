@@ -179,4 +179,24 @@ shap_out = model.shap_values(
 )
 ```
 
+The result has one row per SNP and one column per output (`x`, `y`, and
+each covariate): the mean absolute SHAP value over the attributed samples.
+Covariate values are in SDs of the covariate, after its transform.
+
+`by_path=True` also splits each covariate's SHAP values by the network's two
+paths. Every covariate `<cov>` gets two more columns: `<cov>_score`, the
+part through the SNP's polygenic score (and the correction head's use of
+it), and `<cov>_location`, the part through the predicted location:
+
+```python
+shap_out = model.shap_values(
+    genotype_path="./data/test_genotypes.vcf.gz",
+    sample_data_path="./data/test_sample_data_cov.txt",
+    train_genotype_path="./data/test_genotypes.vcf.gz",
+    train_sample_data_path="./data/test_sample_data_cov.txt",
+    by_path=True,
+)
+shap_out[["snp_id", "cov1", "cov1_score", "cov1_location"]]
+```
+
 See {doc}`api/index` for the full parameter list of each method.

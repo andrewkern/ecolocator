@@ -1,3 +1,5 @@
+import weakref
+
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import backend as K
@@ -150,6 +152,116 @@ def build_location_route(
     model = tf.keras.Model(inputs=location, outputs=output)
     model.compile(optimizer="Adam", loss="mse")
     return model
+
+
+# The attribution model of each network (see _attribution_model), built once
+# and kept as long as the network lives.
+_ATTRIBUTION_MODELS = weakref.WeakKeyDictionary()
+
+
+def _attribution_model(model: tf.keras.Model) -> tf.keras.Model:
+    """A model with two outputs, both the covariate output of an EcoLocator
+    network, computed with the network's own layers in one pass.
+
+    The first is the network's covariate output itself. In the second, the
+    predicted location reaches the correction heads through an unconditional
+    gradient stop, so its gradient leaves out the path through the trunk.
+    Called with ``training=False`` (dropout off), the two outputs are equal
+    and differ only in their gradients."""
+    if model in _ATTRIBUTION_MODELS:
+        return _ATTRIBUTION_MODELS[model]
+    num_covs = sum(layer.name.startswith("score_") for layer in model.layers)
+    location = tf.keras.layers.Lambda(tf.stop_gradient)(model.get_layer("loc").output)
+    covariates = []
+    for j in range(num_covs):
+        score = model.get_layer(f"score_{j}").output
+        hidden = model.get_layer(f"head_{j}")(
+            tf.keras.layers.Concatenate()([score, location])
+        )
+        correction = model.get_layer(f"correction_{j}")(hidden)
+        covariates.append(tf.keras.layers.Add()([score, correction]))
+    score_path = (
+        covariates[0] if num_covs == 1 else tf.keras.layers.Concatenate()(covariates)
+    )
+    both = tf.keras.Model(inputs=model.input, outputs=[model.outputs[1], score_path])
+    _ATTRIBUTION_MODELS[model] = both
+    return both
+
+
+def path_attributions(
+    model: tf.keras.Model,
+    x: np.ndarray,
+    background: np.ndarray,
+    n_samples: int,
+    rng: np.random.Generator,
+    batch_values: int = 4_000_000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """SHAP values of the covariate output of an EcoLocator network
+    (build_pgs_network) by expected gradients (the method of
+    ``shap.GradientExplainer``), split by path.
+
+    For sample i and covariate c, phi_ic = mean over k of
+    (x_i - b_k) * grad f_c(b_k + a_k (x_i - b_k)), with b_k a random row of
+    ``background`` and a_k drawn from U(0, 1). Gradients add over the paths
+    from the input to the output, so with the same draws for both parts:
+
+    - score: the path through the polygenic scores, that is, the score
+      itself and the correction head's use of it;
+    - location: the path through the trunk and the predicted location.
+
+    score + location is the full SHAP value. Summed over SNPs, it tends to
+    f_c(x_i) - mean_b f_c(b) as ``n_samples`` grows.
+
+    x and background are genotype rows (0/1/2 counts, as the model takes
+    them). The draws go through the network in batches of about
+    ``batch_values`` values per array (the interpolation points and each
+    gradient). Returns (score, location), each of shape (samples, SNPs,
+    covariates), in the units of the model's covariate output."""
+    if len(model.outputs) < 2:
+        raise ValueError("the model has no covariate output to attribute")
+    both = _attribution_model(model)
+    num_covs = both.outputs[0].shape[-1]
+
+    @tf.function(reduce_retracing=True)
+    def gradients(points):
+        # One covariate at a time; the column slices must be taken inside
+        # the tape, or the tape cannot trace them back to the input.
+        with tf.GradientTape(persistent=True) as tape:
+            tape.watch(points)
+            f_full, f_score = both(points, training=False)
+            parts = [(f_full[:, c], f_score[:, c]) for c in range(num_covs)]
+        g_full = [tape.gradient(f, points) for f, _ in parts]
+        g_score = [tape.gradient(d, points) for _, d in parts]
+        return tf.stack(g_full), tf.stack(g_score)
+
+    x = np.asarray(x, dtype=np.float32)
+    background = np.asarray(background, dtype=np.float32)
+    n, n_snps = x.shape
+    out_score = np.empty((n, n_snps, num_covs), np.float32)
+    out_location = np.empty((n, n_snps, num_covs), np.float32)
+    # Interpolation points per batch: the points, their offsets from the
+    # sample, and two gradients per covariate each take this many rows.
+    points = max(1, batch_values // n_snps)
+    per_batch = max(1, points // n_samples)  # samples, when all draws fit
+    draws = min(n_samples, points)  # draws per batch otherwise
+    for start in range(0, n, per_batch):
+        xs = x[start : start + per_batch]
+        sum_score = np.zeros((len(xs), n_snps, num_covs), np.float32)
+        sum_location = np.zeros((len(xs), n_snps, num_covs), np.float32)
+        for first in range(0, n_samples, draws):
+            k = min(draws, n_samples - first)
+            b = background[rng.integers(len(background), size=(len(xs), k))]
+            a = rng.random((len(xs), k, 1), dtype=np.float32)
+            diff = xs[:, None, :] - b
+            g_full, g_score = gradients(tf.constant((b + a * diff).reshape(-1, n_snps)))
+            for c in range(num_covs):
+                gf = g_full[c].numpy().reshape(diff.shape)
+                gs = g_score[c].numpy().reshape(diff.shape)
+                sum_score[:, :, c] += (diff * gs).sum(axis=1)
+                sum_location[:, :, c] += (diff * (gf - gs)).sum(axis=1)
+        out_score[start : start + per_batch] = sum_score / n_samples
+        out_location[start : start + per_batch] = sum_location / n_samples
+    return out_score, out_location
 
 
 def build_network(

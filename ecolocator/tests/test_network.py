@@ -90,6 +90,71 @@ def test_pgs_save_load(tmp_path):
     )
 
 
+def test_attribution_model_matches_network_output():
+    """testing that both outputs of the attribution model equal the network's covariate output"""
+    from ecolocator.network import _attribution_model
+
+    for num_covs in (1, 3):
+        model, G = _pgs(num_covs=num_covs)
+        full, score_path = _attribution_model(model)(G, training=False)
+        expected = model(G, training=False)[1].numpy()
+        np.testing.assert_allclose(full.numpy(), expected, atol=1e-6)
+        np.testing.assert_allclose(score_path.numpy(), expected, atol=1e-6)
+        assert _attribution_model(model) is _attribution_model(model)
+
+
+def test_path_attributions_are_complete():
+    """testing that the two paths sum over SNPs to f(x) - f(b) with one background row"""
+    from ecolocator.network import path_attributions
+
+    model, G = _pgs(num_covs=2)
+    score, location = path_attributions(
+        model, G[:3], G[3:4], n_samples=2000, rng=np.random.default_rng(1)
+    )
+    assert score.shape == location.shape == (3, G.shape[1], 2)
+    f = model(G, training=False)[1].numpy()
+    np.testing.assert_allclose(
+        (score + location).sum(axis=1), f[:3] - f[3], atol=0.02 * np.abs(f).max()
+    )
+    assert np.abs(location).sum() > 0
+
+
+def test_path_attributions_without_location_input():
+    """testing that the location path is zero when the heads ignore the location"""
+    from ecolocator.network import path_attributions
+
+    model, G = _pgs(num_covs=2)
+    for c in range(2):
+        head = model.get_layer(f"head_{c}")
+        kernel, bias = head.get_weights()
+        kernel[1:] = 0.0  # rows of the two location inputs
+        head.set_weights([kernel, bias])
+    score, location = path_attributions(
+        model, G[:3], G[3:8], n_samples=50, rng=np.random.default_rng(1)
+    )
+    np.testing.assert_allclose(location, 0.0, atol=1e-6)
+    assert np.abs(score).sum() > 0
+
+
+def test_path_attributions_in_small_batches():
+    """testing that splitting the draws of one sample into batches keeps completeness"""
+    from ecolocator.network import path_attributions
+
+    model, G = _pgs(num_covs=2)
+    score, location = path_attributions(
+        model,
+        G[:2],
+        G[3:4],
+        n_samples=2000,
+        rng=np.random.default_rng(1),
+        batch_values=G.shape[1] * 300,
+    )
+    f = model(G, training=False)[1].numpy()
+    np.testing.assert_allclose(
+        (score + location).sum(axis=1), f[:2] - f[3], atol=0.02 * np.abs(f).max()
+    )
+
+
 def test_pgs_score_l2_penalty_independent_of_num_covs():
     """testing that a covariate's score penalty, relative to its data-loss
     weight, does not change with the number of covariates"""
@@ -102,3 +167,28 @@ def test_pgs_score_l2_penalty_independent_of_num_covs():
             model.get_layer("score_0").losses[0].numpy() * num_covs
         )
     np.testing.assert_allclose(scaled_losses[1], scaled_losses[3])
+
+
+def test_path_attributions_match_gradient_explainer():
+    """testing that the two parts add up to shap.GradientExplainer's SHAP values"""
+    import shap
+    import tensorflow as tf
+    from ecolocator.network import path_attributions
+
+    model, G = _pgs(num_covs=2)
+    x, background = G[:5], G[10:11]
+    # One background row: both methods then estimate the same integral along
+    # the line from it to each sample, and agree up to their random draws.
+    score, location = path_attributions(
+        model, x, background, n_samples=4000, rng=np.random.default_rng(1)
+    )
+    env = tf.keras.Model(inputs=model.input, outputs=model.outputs[1])
+    expected = shap.GradientExplainer(env, background).shap_values(
+        x, nsamples=4000, rseed=1
+    )
+    if isinstance(expected, list):  # older shap: one array per output
+        expected = np.stack(expected, axis=-1)
+    expected = np.asarray(expected).reshape(score.shape)
+    np.testing.assert_allclose(
+        score + location, expected, atol=0.02 * np.abs(expected).max()
+    )
