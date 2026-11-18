@@ -17,6 +17,12 @@ correction heads; SHAP values of a covariate still include the path through the
 predicted location. The L2 penalty of the scores is chosen in each fit from a
 small grid, by the covariates' validation loss.
 
+From these predictions EcoLocator also computes a genomic offset: for each
+sample and site (a common garden, or a future climate), the distance between
+the environment predicted from the sample's genotype and the environment of the
+site, with each covariate weighted by how much the genotype predicts it beyond
+location and by how well it is predicted.
+
 ## At a glance
 
 ```python
@@ -45,7 +51,7 @@ Set EcoLocator up with `uv`.
 :link: getting-started-cli
 :link-type: doc
 
-Train, predict, and attribute from the terminal.
+Train, predict, compute offsets, and attribute from the terminal.
 :::
 
 :::{grid-item-card} {octicon}`code` Python usage

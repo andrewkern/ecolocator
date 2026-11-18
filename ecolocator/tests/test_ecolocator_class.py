@@ -752,6 +752,194 @@ def test_load_model_of_dense_network(tmp_path, example_data):
     )
 
 
+def _masked(sample_data_path, tmp_path, n=2):
+    sd = pd.read_csv(sample_data_path, sep="\t")
+    sd.loc[: n - 1, ["x", "y"]] = np.nan
+    path = tmp_path / "masked.tsv"
+    sd.to_csv(path, sep="\t", index=False)
+    return path
+
+
+def test_fit_location_route_and_weights(example_data, tmp_path):
+    """testing that fit() trains a location route and sets one non-negative weight per covariate"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+    )
+    assert model.location_route_ is not None
+    assert model.env_weights_.shape == (3,)
+    assert np.all(model.env_weights_ >= 0)
+    assert model.env_mse_.shape == (3,)
+    assert np.all(model.env_mse_ > 0)
+    result = model.predict(
+        str(matrix_path), str(_masked(sample_data_path, tmp_path)), location_route=True
+    )
+    assert list(result.columns) == [
+        "sampleID",
+        "x",
+        "y",
+        "cov1",
+        "cov2",
+        "cov3",
+        "cov1_location",
+        "cov2_location",
+        "cov3_location",
+    ]
+    assert np.isfinite(result.drop(columns="sampleID").to_numpy()).all()
+
+
+def test_offset(example_data_30, tmp_path):
+    """testing that offset() gives every sample an offset from a model that did not see it"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    masked = str(_masked(sample_data_path, tmp_path, n=5))
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        masked,
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=2,
+    )
+    sites = pd.DataFrame(
+        {"cov1": [0.2, 0.8], "cov2": [0.5, 0.1], "cov3": [0.3, 0.9]}, index=["a", "b"]
+    )
+    off = model.offset(
+        str(matrix_path), masked, sites, weights=[1.0, 0.0, 0.0], scale_by_error=False
+    )
+    assert list(off.columns) == ["sampleID", "site", "offset"]
+    assert len(off) == 30 * len(sites)
+    b = off[off.site == "b"].set_index("sampleID").offset
+    # Samples with missing x/y: the fitted model's predictions.
+    pred = model.predict(str(matrix_path), masked).set_index("sampleID")
+    expected = np.abs(sites.loc["b", "cov1"] - pred.cov1) / model.sds_[0]
+    np.testing.assert_allclose(b.loc[pred.index], expected, rtol=1e-5)
+    # Training samples: their out-of-fold predictions.
+    cv = model.crossfit_predictions_.set_index("sampleID")
+    assert set(cv.index) == set(model.train_ids_)
+    expected = np.abs(sites.loc["b", "cov1"] - cv.cov1) / model.sds_[0]
+    np.testing.assert_allclose(b.loc[cv.index], expected, rtol=1e-5)
+    # By default each weight is divided by the covariate's prediction error.
+    scaled = model.offset(str(matrix_path), masked, sites, weights=[1.0, 0.0, 0.0])
+    got = scaled[scaled.site == "b"].set_index("sampleID").offset.loc[pred.index]
+    np.testing.assert_allclose(
+        got, b.loc[pred.index] / np.sqrt(model.env_mse_[0]), rtol=1e-5
+    )
+    np.testing.assert_allclose(
+        model.offset_weights_, model.env_weights_ / model.env_mse_
+    )
+    assert (model.offset(str(matrix_path), masked, sites).offset >= 0).all()
+
+
+def test_offset_of_training_samples_needs_weight_folds(example_data, tmp_path):
+    """testing that offsets of training samples need out-of-fold predictions"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=0,
+    )
+    sites = pd.DataFrame({"cov1": [0.2], "cov2": [0.5], "cov3": [0.3]}, index=["a"])
+    with pytest.raises(ValueError, match="validation samples"):
+        model.offset(str(matrix_path), str(sample_data_path), sites)
+    assert model.weight_folds_ == 0
+
+
+def test_save_load_keeps_location_route(tmp_path, example_data_30):
+    """testing that a saved and loaded model keeps its location route and weights"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=2,
+    )
+    model.save(str(tmp_path / "m"))
+    loaded = EcoLocator.load(str(tmp_path / "m"))
+    np.testing.assert_allclose(loaded.env_weights_, model.env_weights_)
+    np.testing.assert_allclose(loaded.env_mse_, model.env_mse_)
+    pd.testing.assert_frame_equal(
+        loaded.crossfit_predictions_, model.crossfit_predictions_
+    )
+    np.testing.assert_array_equal(loaded.train_ids_, model.train_ids_)
+    masked = str(_masked(sample_data_path, tmp_path))
+    a = model.predict(str(matrix_path), masked, location_route=True)
+    b = loaded.predict(str(matrix_path), masked, location_route=True)
+    np.testing.assert_allclose(
+        a.drop(columns="sampleID").to_numpy(),
+        b.drop(columns="sampleID").to_numpy(),
+        rtol=1e-5,
+    )
+
+
+def test_fit_weights_from_validation_only(example_data):
+    """testing that weight_folds below 2 gives weights from the validation samples, one per covariate"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=0,
+    )
+    assert model.env_weights_.shape == (3,)
+    assert np.all(model.env_weights_ >= 0)
+
+
+def test_crossfit_weights_leave_the_model_unchanged(example_data_30, tmp_path, caplog):
+    """testing that cross-fitted weights run without a fallback and do not change the fitted model's predictions"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    masked = str(_masked(sample_data_path, tmp_path))
+    preds = []
+    for folds in (0, 2):
+        model = EcoLocator(**SMALL).fit(
+            str(matrix_path),
+            str(sample_data_path),
+            max_epochs=3,
+            patience=2,
+            train_split=0.6,
+            seed=3,
+            weight_folds=folds,
+        )
+        preds.append(model.predict(str(matrix_path), masked).drop(columns="sampleID"))
+        assert np.all(model.env_weights_ >= 0)
+    assert "Too few samples" not in caplog.text
+    np.testing.assert_allclose(preds[0].to_numpy(), preds[1].to_numpy())
+
+
+def test_offset_with_masked_covariates(example_data_30, tmp_path):
+    """testing that samples to predict may have missing covariates as well as missing x/y"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    sd = pd.read_csv(sample_data_path, sep="\t")
+    sd.loc[:4, ["x", "y", "cov1", "cov2", "cov3"]] = np.nan
+    masked = tmp_path / "masked_all.tsv"
+    sd.to_csv(masked, sep="\t", index=False)
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path), str(masked), max_epochs=3, patience=2, train_split=0.6, seed=3
+    )
+    assert np.all(np.isfinite(model.env_weights_))
+    sites = pd.DataFrame({"cov1": [0.2], "cov2": [0.5], "cov3": [0.3]}, index=["a"])
+    off = model.offset(str(matrix_path), str(masked), sites)
+    assert len(off) == 30
+    assert np.isfinite(off.offset).all()
+    pred = model.predict(str(matrix_path), str(masked), location_route=True)
+    assert np.isfinite(pred.drop(columns="sampleID").to_numpy()).all()
+
+
 def test_fit_without_validation_samples_raises(example_data):
     """testing that a train_split leaving no validation samples gives a clear error"""
     _, _, matrix_path, sample_data_path = example_data
@@ -793,6 +981,63 @@ def test_save_numpy_score_l2(tmp_path, example_data):
     loaded = EcoLocator.load(str(tmp_path / "m"))
     assert list(loaded.score_l2) == [20.0, 60.0]
     assert loaded.network_ == "pgs"
+
+
+def test_offset_recognizes_training_samples_by_id_and_genotype(
+    example_data_30, tmp_path
+):
+    """testing that a training sample keeps its out-of-fold prediction when its x/y are
+    missing, and that another individual with a training ID gets the fitted model's"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    model = EcoLocator(**SMALL).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=2,
+    )
+    sites = pd.DataFrame({"cov1": [0.8], "cov2": [0.1], "cov3": [0.9]}, index=["b"])
+    w = dict(weights=[1.0, 0.0, 0.0], scale_by_error=False)
+    cv = model.crossfit_predictions_.set_index("sampleID")
+    # Training samples with x/y missing in the offset's sample data.
+    masked = str(_masked(sample_data_path, tmp_path, n=3))
+    off = (
+        model.offset(str(matrix_path), masked, sites, **w).set_index("sampleID").offset
+    )
+    expected = np.abs(sites.loc["b", "cov1"] - cv.cov1) / model.sds_[0]
+    np.testing.assert_allclose(off.loc[cv.index], expected, rtol=1e-5)
+    # The same IDs with other genotypes: two training samples swap genotypes.
+    g = pd.read_csv(matrix_path, sep="\t", index_col=0)
+    a, b = g.index[:2]
+    g.loc[[a, b]] = g.loc[[b, a]].to_numpy()
+    swapped = tmp_path / "swapped.tsv"
+    g.to_csv(swapped, sep="\t")
+    off = model.offset(str(swapped), masked, sites, **w).set_index("sampleID").offset
+    sd = pd.read_csv(sample_data_path, sep="\t")
+    sd.loc[sd.sampleID.isin([a, b]), ["x", "y"]] = np.nan
+    sd.to_csv(tmp_path / "ab.tsv", sep="\t", index=False)
+    pred = model.predict(str(swapped), str(tmp_path / "ab.tsv")).set_index("sampleID")
+    expected = np.abs(sites.loc["b", "cov1"] - pred.cov1) / model.sds_[0]
+    np.testing.assert_allclose(off.loc[[a, b]], expected.loc[[a, b]], rtol=1e-5)
+
+
+def test_offset_checks_site_values(example_data_30, tmp_path):
+    """testing that a site value outside a covariate's transform raises"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    model = EcoLocator(**SMALL, cov_transforms=["log", "none", "none"]).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=2,
+    )
+    sites = pd.DataFrame({"cov1": [0.0], "cov2": [0.1], "cov3": [0.9]}, index=["b"])
+    with pytest.raises(ValueError, match="site values"):
+        model.offset(str(matrix_path), str(sample_data_path), sites)
 
 
 def test_invalid_score_l2_raises_at_construction():
