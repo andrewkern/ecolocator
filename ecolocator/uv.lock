@@ -583,7 +583,7 @@ requires-dist = [
     { name = "pandas" },
     { name = "scikit-allel" },
     { name = "scikit-learn", specifier = ">=1.0" },
-    { name = "scipy" },
+    { name = "scipy", specifier = ">=1.11" },
     { name = "seaborn" },
     { name = "shap", specifier = ">=0.47.0" },
     { name = "tensorflow" },

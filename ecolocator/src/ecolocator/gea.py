@@ -26,10 +26,10 @@ SNPs whose results are used; ``min_maf`` sets that set.
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
+from scipy.stats import false_discovery_control, norm
 from sklearn.preprocessing import SplineTransformer
 
-from .utils import read_genotypes
+from .utils import covariate_columns, filter_snps, read_genotypes
 
 # median of the chi-square distribution with one degree of freedom
 CHI2_MEDIAN = 0.456
@@ -48,91 +48,41 @@ def knots_for(n_samples: int, n_knots: int, min_per_term: int = 10) -> int:
 def location_basis(locations: np.ndarray, n_knots: int) -> np.ndarray:
     """Tensor-product cubic B-spline basis of 2-D locations (samples x 2),
     with ``n_knots`` uniform knots per axis: samples x (n_knots + 2)^2."""
-    locations = np.asarray(locations, dtype=float)
-    bx = SplineTransformer(n_knots=n_knots, degree=3).fit_transform(locations[:, [0]])
-    by = SplineTransformer(n_knots=n_knots, degree=3).fit_transform(locations[:, [1]])
-    return np.einsum("ni,nj->nij", bx, by).reshape(len(locations), -1)
-
-
-def _column_space(D: np.ndarray, rtol: float = 1e-10) -> np.ndarray:
-    """Orthonormal basis of the column space of D, cut at its numerical rank.
-    The B-splines sum to 1 in every row, so with an intercept the design is
-    rank-deficient; the SVD keeps only directions above rtol times the
-    largest singular value."""
-    U, s, _ = np.linalg.svd(D, full_matrices=False)
-    return U[:, s > rtol * s[0]]
+    splines = SplineTransformer(n_knots=n_knots, degree=3).fit_transform(
+        np.asarray(locations, dtype=float)
+    )
+    bx, by = np.split(splines, 2, axis=1)  # x's splines, then y's
+    return np.einsum("ni,nj->nij", bx, by).reshape(len(splines), -1)
 
 
 def env_effects(genotypes: np.ndarray, env: np.ndarray, basis: np.ndarray):
-    """Least-squares effect of ``env`` on every column of ``genotypes``
-    (samples x SNPs), adjusting for an intercept and ``basis``. Returns the
-    effects and their standard errors, one per SNP."""
-    Q = _column_space(np.column_stack([np.ones(len(env)), basis]))
-    e = env - Q @ (Q.T @ env)
-    R = genotypes - Q @ (Q.T @ genotypes)
-    ee = e @ e
-    beta = (e @ R) / ee
+    """Least-squares effect of each environmental variable (columns of
+    ``env``, samples x variables) on every SNP (columns of ``genotypes``),
+    adjusting for an intercept and ``basis``. Returns the effects and their
+    standard errors, each variables x SNPs.
+
+    The intercept and basis are projected out once for all variables: the
+    projected variable is orthogonal to them, so its product with the
+    genotypes equals its product with their residuals, and the residual sum
+    of squares of each SNP follows from the projection of the genotypes."""
+    env = np.asarray(env, dtype=float).reshape(len(genotypes), -1)
+    # Orthonormal basis of the covariates' column space, cut at its numerical
+    # rank: the B-splines sum to 1 in every row, so with an intercept the
+    # design is rank-deficient.
+    U, s, _ = np.linalg.svd(
+        np.column_stack([np.ones(len(env)), basis]), full_matrices=False
+    )
+    Q = U[:, s > 1e-10 * s[0]]
     dof = len(env) - Q.shape[1] - 1
     if dof < 1:
         raise ValueError("too few samples for the location basis and the environment")
-    resid_var = ((R**2).sum(axis=0) - beta**2 * ee) / dof
+    QtG = Q.T @ genotypes
+    rss = np.einsum("ij,ij->j", genotypes, genotypes) - np.einsum("ij,ij->j", QtG, QtG)
+    e = env - Q @ (Q.T @ env)
+    ee = np.einsum("ij,ij->j", e, e)[:, None]
+    beta = (e.T @ genotypes) / ee
+    resid_var = (rss - beta**2 * ee) / dof
     return beta, np.sqrt(np.maximum(resid_var, 1e-12) / ee)
-
-
-def bh_qvalues(p: np.ndarray) -> np.ndarray:
-    """Benjamini-Hochberg q-values."""
-    p = np.asarray(p, dtype=float)
-    order = np.argsort(p)
-    ranked = p[order] * len(p) / np.arange(1, len(p) + 1)
-    q = np.minimum.accumulate(ranked[::-1])[::-1]
-    out = np.empty_like(q)
-    out[order] = np.minimum(q, 1.0)
-    return out
-
-
-def read_dosages(genotype_path: str):
-    """Genotypes of a .vcf, .vcf.gz, .zarr, or dosage-matrix file as
-    alternate-allele counts: (samples x SNPs array, NaN for missing calls;
-    sample IDs; SNP IDs)."""
-    genotypes, samples, snp_ids = read_genotypes(genotype_path)
-    counts = genotypes.to_n_alt(fill=-1).T.astype(float)
-    counts[counts < 0] = np.nan
-    return counts, np.asarray(samples, dtype=str), np.asarray(snp_ids, dtype=str)
-
-
-def run_corrected_gea(
-    genotype_path: str,
-    sample_data_path: str,
-    locations_path: str,
-    env_names=None,
-    **settings,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """corrected_gea from files. ``sample_data_path``: TSV with sampleID and
-    the environmental variables (``env_names``; default: every column but
-    sampleID, x, and y). ``locations_path``: TSV with sampleID, x, and y, the
-    predicted locations (for example the output of ``ecolocator loo``).
-    Samples are used when they are in all three files and have a value of
-    every variable and a location. ``settings`` go to corrected_gea."""
-    G, samples, snp_ids = read_dosages(genotype_path)
-    data = pd.read_csv(sample_data_path, sep="\t", dtype={"sampleID": str}).set_index(
-        "sampleID"
-    )
-    locs = pd.read_csv(locations_path, sep="\t", dtype={"sampleID": str}).set_index(
-        "sampleID"
-    )
-    if env_names is None:
-        env_names = [c for c in data.columns if c not in ("x", "y")]
-    missing = [c for c in env_names if c not in data.columns]
-    if missing:
-        raise ValueError(f"not in the sample data: {', '.join(missing)}")
-    env = data.reindex(samples)[list(env_names)].astype(float)
-    xy = locs.reindex(samples)[["x", "y"]].astype(float)
-    use = env.notna().all(axis=1).to_numpy() & xy.notna().all(axis=1).to_numpy()
-    if not use.any():
-        raise ValueError("no sample has every variable and a location")
-    return corrected_gea(
-        G[use], env[use], xy.to_numpy()[use], snp_ids=snp_ids, **settings
-    )
 
 
 def corrected_gea(
@@ -173,37 +123,35 @@ def corrected_gea(
         raise ValueError("env needs a finite value for every sample")
     snp_ids = np.arange(G.shape[1]) if snp_ids is None else np.asarray(snp_ids)
 
-    called = np.isfinite(G)
-    mean = np.nanmean(np.where(called, G, np.nan), axis=0)
-    G = np.where(called, G, mean)
-    n_called = called.sum(axis=0)
-    alt = (np.where(called, G, 0.0)).sum(axis=0)
-    mac = np.minimum(alt, 2 * n_called - alt)
+    missing = np.isnan(G)
+    n_called = len(G) - missing.sum(axis=0)
     with np.errstate(invalid="ignore", divide="ignore"):
-        maf = mac / (2 * n_called)
-    keep = (mac >= min_mac) & (maf >= min_maf)
+        mean = np.nansum(G, axis=0) / n_called
+    maf = np.minimum(mean, 2 - mean) / 2
+    keep = (2 * n_called * maf >= min_mac) & (maf >= min_maf)
     if not keep.any():
         raise ValueError("no SNP passes min_mac and min_maf")
-    G, snp_ids, maf = G[:, keep], snp_ids[keep], maf[keep]
+    G, snp_ids, maf, mean = G[:, keep], snp_ids[keep], maf[keep], mean[keep]
+    rows, cols = np.nonzero(missing[:, keep])
+    G[rows, cols] = mean[cols]
 
     knots = knots_for(len(G), n_knots, min_per_term)
-    basis = location_basis(xy, knots)
+    beta, se = env_effects(G, env.to_numpy(dtype=float), location_basis(xy, knots))
     results, summary = [], []
-    for name in env.columns:
-        beta, se = env_effects(G, env[name].to_numpy(dtype=float), basis)
-        z = beta / se
+    for name, b, s in zip(env.columns, beta, se):
+        z = b / s
         gif = np.median(z**2) / CHI2_MEDIAN
         z_cal = z / np.sqrt(gif)
         p = 2 * norm.sf(np.abs(z_cal))
-        q = bh_qvalues(p)
+        q = false_discovery_control(p)
         results.append(
             pd.DataFrame(
                 {
                     "snp_id": snp_ids,
                     "env": name,
                     "maf": maf,
-                    "beta": beta,
-                    "se": se,
+                    "beta": b,
+                    "se": s,
                     "z": z,
                     "z_cal": z_cal,
                     "p": p,
@@ -224,3 +172,50 @@ def corrected_gea(
             }
         )
     return pd.concat(results, ignore_index=True), pd.DataFrame(summary)
+
+
+def run_corrected_gea(
+    genotype_path: str,
+    sample_data_path: str,
+    locations_path: str,
+    env_names=None,
+    min_mac: int = 2,
+    **settings,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """corrected_gea from files. ``genotype_path``: .vcf, .vcf.gz, .zarr, or a
+    dosage-matrix TSV. ``sample_data_path``: TSV with sampleID and the
+    environmental variables (``env_names``; default: every column but
+    sampleID, x, and y). ``locations_path``: TSV with sampleID, x, and y, the
+    predicted locations (for example the output of ``ecolocator loo``).
+
+    Samples are used when they are in all three files and have a value of
+    every variable and a location. SNPs pass ``utils.filter_snps`` (the
+    biallelic sites and minimum minor-allele count of ``EcoLocator.fit``) on
+    those samples, and a genotype is the count of allele 1, the encoding the
+    network reads. ``settings`` go to corrected_gea."""
+    genotypes, samples, snp_ids = read_genotypes(genotype_path)
+    samples = np.asarray(samples, dtype=str)
+    data = pd.read_csv(
+        sample_data_path, sep="\t", index_col="sampleID", dtype={"sampleID": str}
+    )
+    locs = pd.read_csv(
+        locations_path, sep="\t", index_col="sampleID", dtype={"sampleID": str}
+    )
+    names = covariate_columns(data.columns, env_names)
+    env = data.reindex(samples)[names].astype(float)
+    xy = locs.reindex(samples)[["x", "y"]].astype(float)
+    use = (env.notna().all(axis=1) & xy.notna().all(axis=1)).to_numpy()
+    if not use.any():
+        raise ValueError("no sample has every variable and a location")
+
+    genotypes, kept = filter_snps(genotypes[:, use], min_mac=min_mac)
+    dosage = genotypes.to_allele_counts()[:, :, 1].T.astype(float)
+    dosage[genotypes.is_missing().T] = np.nan
+    return corrected_gea(
+        dosage,
+        env[use],
+        xy.to_numpy()[use],
+        snp_ids=np.asarray(snp_ids, dtype=str)[kept],
+        min_mac=min_mac,
+        **settings,
+    )

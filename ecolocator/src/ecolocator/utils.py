@@ -65,31 +65,15 @@ def load_genotypes(
         gmat = pd.read_csv(matrix_path, sep="\t")
         samples = np.array(gmat["sampleID"])
         snp_ids = np.array(gmat.columns.drop("sampleID"))
-        gmat = gmat.drop(labels="sampleID", axis=1)
-        gmat = np.array(gmat, dtype="int8")
-        for i in range(
-            gmat.shape[0]
-        ):  # kludge to get haplotypes for reading in to allel.
-            h1 = []
-            h2 = []
-            for j in range(gmat.shape[1]):
-                count = gmat[i, j]
-                if count == 0:
-                    h1.append(0)
-                    h2.append(0)
-                elif count == 1:
-                    h1.append(1)
-                    h2.append(0)
-                elif count == 2:
-                    h1.append(1)
-                    h2.append(1)
-            if i == 0:
-                hmat = h1
-                hmat = np.vstack((hmat, h2))
-            else:
-                hmat = np.vstack((hmat, h1))
-                hmat = np.vstack((hmat, h2))
-        genotypes = allel.HaplotypeArray(np.transpose(hmat)).to_genotypes(ploidy=2)
+        counts = gmat.drop(columns="sampleID").to_numpy(dtype=float).T  # SNPs x samples
+        missing = np.isnan(counts)
+        if not np.isin(counts[~missing], (0, 1, 2)).all():
+            raise ValueError("a dosage matrix may hold only 0, 1, 2, or missing values")
+        # A count of 1 is one copy of allele 1, a count of 2 two copies;
+        # phase is not known. Missing entries become missing calls (-1).
+        gt = np.stack([counts >= 1, counts == 2], axis=-1).astype(np.int8)
+        gt[missing] = -1
+        genotypes = allel.GenotypeArray(gt)
     else:
         raise ValueError("Must provide one of zarr_path, vcf_path, or matrix_path")
     logging.info(f"loaded {np.shape(genotypes)} genotypes")
@@ -106,6 +90,20 @@ def read_genotypes(genotype_path: str):
     if path.endswith((".vcf", ".vcf.gz")):
         return load_genotypes(vcf_path=path)
     return load_genotypes(matrix_path=path)
+
+
+def covariate_columns(columns, covariates: list = None) -> list:
+    """The covariate columns of a sample-data table: ``covariates`` (checked
+    against ``columns``), or every column but sampleID, x, and y."""
+    if covariates is None:
+        return [c for c in columns if c not in {"sampleID", "sampleID2", "x", "y"}]
+    missing = [c for c in covariates if c not in columns]
+    if missing:
+        raise ValueError(
+            f"Covariate column(s) not found in sample data: {missing}. "
+            f"Available columns: {list(columns)}."
+        )
+    return list(covariates)
 
 
 def sort_samples(
@@ -142,17 +140,7 @@ def sort_samples(
         [sample_data["sampleID2"].iloc[x] == samples[x] for x in range(len(samples))]
     ):  # check that all sample names are present
         raise ValueError("sample ordering failed! Check that sample IDs match the VCF.")
-    if covariates is None:
-        reserved = {"sampleID2", "x", "y"}
-        cov_cols = [c for c in sample_data.columns if c not in reserved]
-    else:
-        missing = [c for c in covariates if c not in sample_data.columns]
-        if missing:
-            raise ValueError(
-                f"Covariate column(s) not found in sample data: {missing}. "
-                f"Available columns: {list(sample_data.columns)}."
-            )
-        cov_cols = list(covariates)
+    cov_cols = covariate_columns(sample_data.columns, covariates)
     locs = np.array(sample_data[["x", "y"] + cov_cols])
     logging.debug(f"Input data:\n{locs}")
     logging.info(f"sorted samples and covariates for {len(samples)} samples")

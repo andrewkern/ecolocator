@@ -2,33 +2,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from conftest import structured_gea
 from ecolocator.gea import (
-    bh_qvalues,
     corrected_gea,
     env_effects,
     knots_for,
     location_basis,
     run_corrected_gea,
 )
-
-
-def _structured(n=600, n_null=200, n_causal=5, seed=0):
-    """Samples on a 5 x 5 landscape. Null SNPs have allele frequencies that
-    change smoothly with location (population structure); the environment is
-    a smooth function of location plus a local part; causal SNPs follow the
-    local part of the environment, which location does not carry."""
-    rng = np.random.default_rng(seed)
-    xy = rng.uniform(0, 5, size=(n, 2))
-    local = rng.normal(size=n)
-    env = np.sin(xy[:, 0]) + 0.5 * xy[:, 1] + local
-    G = []
-    for _ in range(n_null):
-        a, b, c = rng.normal(size=3)
-        logit = a * np.sin(xy[:, 0] + c) + b * (xy[:, 1] - 2.5) / 2.5
-        G.append(rng.binomial(2, 1 / (1 + np.exp(-logit))))
-    for _ in range(n_causal):
-        G.append(rng.binomial(2, 1 / (1 + np.exp(-1.2 * local))))
-    return np.column_stack(G).astype(float), env, xy
 
 
 def test_knots_for_keeps_samples_per_basis_function():
@@ -62,13 +43,13 @@ def test_env_effects_match_least_squares():
         resid = G[:, j] - X @ coef
         sigma2 = resid @ resid / (200 - X.shape[1])
         cov = sigma2 * np.linalg.inv(X.T @ X)
-        np.testing.assert_allclose(beta[j], coef[1], rtol=1e-8)
-        np.testing.assert_allclose(se[j], np.sqrt(cov[1, 1]), rtol=1e-6)
+        np.testing.assert_allclose(beta[0, j], coef[1], rtol=1e-8)
+        np.testing.assert_allclose(se[0, j], np.sqrt(cov[1, 1]), rtol=1e-6)
 
 
 def test_corrected_gea_finds_causal_snps_beyond_structure():
     """testing that SNPs following the environment beyond location rank first and pass q < 0.05"""
-    G, env, xy = _structured()
+    G, env, xy = structured_gea()
     results, summary = corrected_gea(G, pd.DataFrame({"env": env}), xy, min_maf=0.0)
     causal = results.snp_id >= 200
     assert results.loc[causal, "q"].max() < 0.05
@@ -80,7 +61,7 @@ def test_corrected_gea_finds_causal_snps_beyond_structure():
 
 def test_corrected_gea_filters_and_missing_calls():
     """testing the MAF filter, mean imputation of missing calls, and the table columns"""
-    G, env, xy = _structured(n=300, n_null=50, n_causal=0, seed=3)
+    G, env, xy = structured_gea(n=300, n_null=50, n_causal=0, seed=3)
     G[:, 0] = 0.0
     G[0, 0] = 1.0  # one copy: below min_mac 2
     G[:5, 1] = np.nan  # missing calls
@@ -111,7 +92,7 @@ def test_corrected_gea_filters_and_missing_calls():
 
 def test_corrected_gea_checks_inputs():
     """testing that mismatched or non-finite inputs are refused"""
-    G, env, xy = _structured(n=200, n_null=20, n_causal=0, seed=4)
+    G, env, xy = structured_gea(n=200, n_null=20, n_causal=0, seed=4)
     env = pd.DataFrame({"env": env})
     with pytest.raises(ValueError, match="one row per sample"):
         corrected_gea(G[:-1], env, xy)
@@ -123,36 +104,22 @@ def test_corrected_gea_checks_inputs():
         corrected_gea(G, env, xy, min_maf=0.6)
 
 
-def test_bh_qvalues():
-    """testing Benjamini-Hochberg q-values against a hand computation"""
-    p = np.array([0.01, 0.04, 0.03, 0.5])
-    # Sorted: 0.01, 0.03, 0.04, 0.5 -> p * 4 / rank = 0.04, 0.06, 0.0533, 0.5,
-    # then the running minimum from the top.
-    np.testing.assert_allclose(bh_qvalues(p), [0.04, 0.16 / 3, 0.16 / 3, 0.5])
-
-
-def test_run_corrected_gea_from_files(tmp_path):
+def test_run_corrected_gea_from_files(gea_files, tmp_path):
     """testing the file-level run: sample matching and the default variables"""
-    G, env, xy = _structured(n=300, n_null=30, n_causal=3, seed=5)
-    ids = [f"s{i}" for i in range(len(G))]
-    g = pd.DataFrame(G.astype(int), columns=[f"v{j}" for j in range(G.shape[1])])
-    g.insert(0, "sampleID", ids)
-    g.to_csv(tmp_path / "g.tsv", sep="\t", index=False)
-    pd.DataFrame({"sampleID": ids, "x": 0.0, "y": 0.0, "env": env}).to_csv(
-        tmp_path / "s.tsv", sep="\t", index=False
-    )
-    locs = pd.DataFrame({"sampleID": ids, "x": xy[:, 0], "y": xy[:, 1]})
-    locs.iloc[:10].to_csv(tmp_path / "few.tsv", sep="\t", index=False)
-    locs.to_csv(tmp_path / "l.tsv", sep="\t", index=False)
     results, summary = run_corrected_gea(
-        str(tmp_path / "g.tsv"),
-        str(tmp_path / "s.tsv"),
-        str(tmp_path / "l.tsv"),
+        str(gea_files["genotypes"]),
+        str(gea_files["samples"]),
+        str(gea_files["locations"]),
         min_maf=0.0,
     )
     assert list(summary.env) == ["env"]  # x and y are not variables
     assert summary.loc[0, "n_samples"] == 300
+    assert results.loc[results.snp_id.isin(["v30", "v31", "v32"]), "q"].max() < 0.05
+    few = tmp_path / "few.tsv"
+    pd.read_csv(gea_files["locations"], sep="\t").iloc[:10].to_csv(
+        few, sep="\t", index=False
+    )
     with pytest.raises(ValueError, match="too few samples"):
         run_corrected_gea(
-            str(tmp_path / "g.tsv"), str(tmp_path / "s.tsv"), str(tmp_path / "few.tsv")
+            str(gea_files["genotypes"]), str(gea_files["samples"]), str(few)
         )

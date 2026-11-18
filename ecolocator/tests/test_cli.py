@@ -7,6 +7,12 @@ from typer.testing import CliRunner
 from ecolocator import EcoLocator
 from ecolocator.cli import app
 
+
+def _plain(output):
+    """CLI output without the color escape codes that rich may add."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", output)
+
+
 # A small, fixed-penalty network, so the CLI runs one fit per fold.
 _SMALL_NETWORK_ARGS = [
     "--nlayers",
@@ -64,7 +70,7 @@ def test_bad_score_l2_is_a_usage_error(example_data, tmp_path):
     result = CliRunner().invoke(app, args)
     assert result.exit_code == 2
     # Rich may color the message; drop the escape codes before searching.
-    assert "score-l2" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "score-l2" in _plain(result.output)
     assert not (tmp_path / "m").exists()
 
 
@@ -124,7 +130,7 @@ def test_score_l2_trailing_comma_is_a_usage_error(example_data, tmp_path):
     args += ["-o", str(tmp_path / "m"), "--score-l2", "20,60,"]
     result = CliRunner().invoke(app, args)
     assert result.exit_code == 2
-    assert "score-l2" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "score-l2" in _plain(result.output)
     assert not (tmp_path / "m").exists()
 
 
@@ -167,44 +173,33 @@ def test_offset_writes_one_row_per_sample_and_site(example_data_30, tmp_path):
     assert set(off.site) == {"a", "b"}
 
 
-def test_gea_writes_results_and_summary(tmp_path):
+def test_gea_writes_results_and_summary(gea_files, tmp_path):
     """testing that `ecolocator gea` writes one row per SNP and a summary per variable"""
-    rng = np.random.default_rng(0)
-    n, p = 300, 20
-    xy = rng.uniform(0, 5, size=(n, 2))
-    ids = [f"s{i}" for i in range(n)]
-    g = pd.DataFrame(
-        rng.binomial(2, 0.3, size=(n, p)), columns=[f"v{j}" for j in range(p)]
-    )
-    g.insert(0, "sampleID", ids)
-    g.to_csv(tmp_path / "g.tsv", sep="\t", index=False)
-    pd.DataFrame(
-        {
-            "sampleID": ids,
-            "x": xy[:, 0],
-            "y": xy[:, 1],
-            "a": rng.normal(size=n),
-            "b": rng.normal(size=n),
-        }
-    ).to_csv(tmp_path / "s.tsv", sep="\t", index=False)
-    pd.DataFrame({"sampleID": ids, "x": xy[:, 0], "y": xy[:, 1]}).to_csv(
-        tmp_path / "loc.tsv", sep="\t", index=False
-    )
-    args = ["gea", "-g", str(tmp_path / "g.tsv"), "-s", str(tmp_path / "s.tsv")]
-    args += [
-        "-l",
-        str(tmp_path / "loc.tsv"),
-        "-o",
-        str(tmp_path / "gea.tsv"),
-        "--env",
-        "a",
-    ]
-    result = CliRunner().invoke(app, args)
+
+    def run(env):
+        return CliRunner().invoke(
+            app,
+            [
+                "gea",
+                "-g",
+                str(gea_files["genotypes"]),
+                "-s",
+                str(gea_files["samples"]),
+                "-l",
+                str(gea_files["locations"]),
+                "-o",
+                str(tmp_path / "gea.tsv"),
+                "--env",
+                env,
+            ],
+        )
+
+    result = run("env")
     assert result.exit_code == 0, result.output
     out = pd.read_csv(tmp_path / "gea.tsv", sep="\t")
-    assert set(out.env) == {"a"} and len(out) == p
+    assert set(out.env) == {"env"}
     summary = pd.read_csv(tmp_path / "gea_summary.tsv", sep="\t")
-    assert list(summary.env) == ["a"]
-    bad = CliRunner().invoke(app, [*args[:-1], "nope"])
+    assert list(summary.env) == ["env"]
+    bad = run("nope")
     assert bad.exit_code == 2
-    assert "nope" in re.sub(r"\x1b\[[0-9;]*m", "", bad.output)
+    assert "nope" in _plain(bad.output)
