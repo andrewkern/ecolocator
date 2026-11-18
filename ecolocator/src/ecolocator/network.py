@@ -2,11 +2,124 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras import backend as K
 
+from .settings import NETWORK_DEFAULTS as D
+
 
 @tf.keras.utils.register_keras_serializable(name="euclid_loss")
 def euclid_loss(y_true, y_pred):
     """Euclidean distance between 2-D coordinates (location)."""
     return K.sqrt(K.sum(K.square(y_pred - y_true), axis=-1))
+
+
+@tf.keras.utils.register_keras_serializable(package="ecolocator", name="StopGradient")
+class StopGradient(tf.keras.layers.Layer):
+    """Identity in the forward pass. In training it passes no gradient back
+    to its input; otherwise (prediction, attribution) gradients pass."""
+
+    def call(self, inputs, training=None):
+        return tf.stop_gradient(inputs) if training else inputs
+
+
+def build_pgs_network(
+    num_covs: int,
+    geno_mean: np.ndarray,
+    geno_sd: np.ndarray,
+    score_l2: float,
+    nlayers: int = D["nlayers"],
+    width: int = D["width"],
+    dropout_prop: float = D["dropout_prop"],
+    input_dropout: float = D["input_dropout"],
+    weight_decay: float = D["weight_decay"],
+    head_width: int = D["head_width"],
+    loc_weight: float = D["loc_weight"],
+    env_weight: float = D["env_weight"],
+) -> tf.keras.Model:
+    """The EcoLocator network.
+
+    Genotypes (0/1/2 counts) are standardized inside the model with the
+    training samples' means and SDs (geno_mean, geno_sd; one per SNP). Two
+    routes follow:
+
+    - location: input dropout, ``nlayers`` dense ELU layers of ``width``
+      units with dropout after each, and a linear (x, y) head;
+    - environment: for each covariate j, a linear score s_j of all SNPs (no
+      bias, L2 penalty ``score_l2``) and a correction head h_j (``head_width``
+      ELU units, then one linear unit) that reads s_j and the predicted
+      location. The covariate is s_j + h_j, so the score enters with a fixed
+      coefficient of 1 and its penalty acts on the SNP coefficients
+      themselves.
+
+    The predicted location enters h_j through a gradient stop that acts only
+    in training: the covariate loss trains only the scores and the
+    correction heads, and only the location loss trains the trunk. Outside
+    training the gradient passes, so gradient-based attribution (SHAP) of a
+    covariate includes the path through the predicted location.
+
+    The penalties (``score_l2``, and ``weight_decay`` on the trunk and the
+    heads) are multiplied by the loss weight of their output, so the loss
+    weights set only the balance between location and covariates. The
+    covariate loss is the mean squared error over the K covariates, so each
+    covariate's error enters it with weight 1/K. Each score's penalty is
+    divided by K too, so that relative to its covariate's own error the
+    penalty is ``score_l2`` for any number of covariates.
+    """
+    loc_reg = tf.keras.regularizers.l2(weight_decay * loc_weight)
+    env_reg = tf.keras.regularizers.l2(weight_decay * env_weight)
+    geno_sd = np.where(np.asarray(geno_sd) > 0, geno_sd, 1.0)
+    geno_input = tf.keras.Input(shape=(len(geno_mean),), name="geno_input")
+    z = tf.keras.layers.Normalization(
+        mean=np.asarray(geno_mean, dtype=np.float32),
+        variance=np.square(geno_sd).astype(np.float32),
+        name="standardize",
+    )(geno_input)
+
+    h = tf.keras.layers.Dropout(input_dropout)(z)
+    for _ in range(nlayers):
+        h = tf.keras.layers.Dense(width, activation="elu", kernel_regularizer=loc_reg)(
+            h
+        )
+        h = tf.keras.layers.Dropout(dropout_prop)(h)
+    loc_output = tf.keras.layers.Dense(2, kernel_regularizer=loc_reg, name="loc")(h)
+
+    if num_covs == 0:
+        model = tf.keras.Model(inputs=geno_input, outputs=loc_output)
+        model.compile(optimizer="Adam", loss=[euclid_loss], loss_weights=[loc_weight])
+        return model
+
+    location = StopGradient(name="stop_location")(loc_output)
+    covariates = []
+    for j in range(num_covs):
+        # Divided by num_covs: the covariate MSE gives each covariate's error
+        # weight 1/num_covs, and the penalty scales the same way.
+        score = tf.keras.layers.Dense(
+            1,
+            use_bias=False,
+            kernel_regularizer=tf.keras.regularizers.l2(
+                score_l2 * env_weight / num_covs
+            ),
+            name=f"score_{j}",
+        )(z)
+        hidden = tf.keras.layers.Dense(
+            head_width, activation="elu", kernel_regularizer=env_reg, name=f"head_{j}"
+        )(tf.keras.layers.Concatenate()([score, location]))
+        correction = tf.keras.layers.Dense(
+            1, kernel_regularizer=env_reg, name=f"correction_{j}"
+        )(hidden)
+        covariates.append(
+            tf.keras.layers.Add(name=f"covariate_{j}")([score, correction])
+        )
+    env_output = (
+        covariates[0]
+        if num_covs == 1
+        else tf.keras.layers.Concatenate(name="covariates")(covariates)
+    )
+    model = tf.keras.Model(inputs=geno_input, outputs=[loc_output, env_output])
+    model.compile(
+        optimizer="Adam",
+        loss=[euclid_loss, "mse"],
+        loss_weights=[loc_weight, env_weight],
+    )
+    return model
 
 
 def build_network(
@@ -18,6 +131,9 @@ def build_network(
     loc_weight: float = 1.0,
     env_weight: float = 1.0,
 ) -> tf.keras.Model:
+    """A dense network: a trunk of dense ELU layers with linear location
+    and covariate heads. EcoLocator.load reads models saved with it, and it
+    serves as a baseline for comparisons with build_pgs_network."""
     geno_input = tf.keras.Input(shape=(n_snps,), name="geno_input")
     trunk = tf.keras.layers.BatchNormalization()(geno_input)
     for _ in range(int(np.floor(nlayers / 2))):

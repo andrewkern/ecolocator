@@ -12,44 +12,103 @@ from .utils import (
     replace_missing_data,
     back_transform_env,
 )
-from .network import build_network, train_network, euclid_loss
+from .network import build_pgs_network, train_network, euclid_loss
+from .settings import NETWORK_DEFAULTS as D
+
+# Network settings, saved with a model and passed to build_pgs_network
+# (except score_l2, which fit() resolves to one penalty first).
+HYPERPARAMETERS = tuple(D)
+
+
+def _json_value(value):
+    """A setting as JSON can store it: sequences (also NumPy arrays) as lists
+    of floats, NumPy scalars and 0-d arrays as Python numbers."""
+    if isinstance(value, np.ndarray) and value.ndim == 0:
+        return value.item()
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return [float(v) for v in value]
+    return value.item() if isinstance(value, np.generic) else value
+
+
+def _penalties(score_l2):
+    """score_l2 as a list of floats; raises ValueError unless it is one or
+    more finite numbers >= 0."""
+    try:
+        penalties = [float(p) for p in np.atleast_1d(score_l2)]
+    except (TypeError, ValueError):
+        penalties = []
+    if not penalties or not all(np.isfinite(p) and p >= 0 for p in penalties):
+        raise ValueError(
+            f"score_l2 must be one or more finite numbers >= 0, not {score_l2!r}"
+        )
+    return penalties
+
+
+def _column_mean_sd(*blocks, rows=1024):
+    """Mean and SD of every column over the rows of all blocks together.
+    Works through ``rows`` rows at a time, so that memory beyond the blocks
+    stays at a few float64 arrays of that many rows."""
+    n = sum(len(b) for b in blocks)
+    chunks = [b[i : i + rows] for b in blocks for i in range(0, len(b), rows)]
+    mean = sum(c.sum(axis=0, dtype=float) for c in chunks) / n
+    var = sum(np.square(c - mean).sum(axis=0) for c in chunks) / n
+    return mean, np.sqrt(var)
 
 
 class EcoLocator:
     """
     A neural network model for predicting sample locations and environmental
     covariates from genotype data.
+
+    The network (network.build_pgs_network) has a location trunk and, for
+    each covariate, a linear polygenic score of all SNPs plus a small
+    correction head that also reads the predicted location. ``score_l2`` is
+    the L2 penalty of the scores: a number fixes it; a sequence is searched,
+    each fit keeping the penalty with the lowest covariate validation loss.
     """
 
     def __init__(
         self,
         cov_transforms: list = None,
-        nlayers: int = 10,
-        width: int = 256,
-        dropout_prop: float = 0.25,
-        loc_weight: float = 1.0,
-        env_weight: float = 1.0,
+        nlayers: int = D["nlayers"],
+        width: int = D["width"],
+        dropout_prop: float = D["dropout_prop"],
+        input_dropout: float = D["input_dropout"],
+        weight_decay: float = D["weight_decay"],
+        head_width: int = D["head_width"],
+        score_l2: float | tuple = D["score_l2"],
+        loc_weight: float = D["loc_weight"],
+        env_weight: float = D["env_weight"],
     ):
         self.cov_transforms = cov_transforms
         self.nlayers = nlayers
         self.width = width
         self.dropout_prop = dropout_prop
+        self.input_dropout = input_dropout
+        self.weight_decay = weight_decay
+        self.head_width = head_width
+        _penalties(score_l2)
+        self.score_l2 = score_l2
         self.loc_weight = loc_weight
         self.env_weight = env_weight
+        # "pgs" (build_pgs_network); load() sets "dense" for models saved
+        # with network.build_network, which fit() does not refit.
+        self.network_ = "pgs"
 
     @classmethod
     def load(cls, path: str) -> "EcoLocator":
         with open(os.path.join(path, "params.json")) as f:
             params = json.load(f)
 
+        # Models saved with the dense network (network.build_network) have
+        # no "network" field and fewer settings; the missing ones keep their
+        # defaults. The saved model file predicts and explains as it was
+        # fitted; fit() refuses to refit such a model.
         obj = cls(
             cov_transforms=params["cov_transforms"],
-            nlayers=params["nlayers"],
-            width=params["width"],
-            dropout_prop=params["dropout_prop"],
-            loc_weight=params["loc_weight"],
-            env_weight=params["env_weight"],
+            **{k: params[k] for k in HYPERPARAMETERS if k in params},
         )
+        obj.network_ = params.get("network", "dense")
 
         arrays = np.load(os.path.join(path, "arrays.npz"))
         obj.meanlong_ = arrays["meanlong"].item()
@@ -64,6 +123,7 @@ class EcoLocator:
         obj.seed_ = params["seed"]
         obj.num_covs_ = len(obj.cov_names_)
         obj.transforms_ = params["transforms"]
+        obj.score_l2_ = params.get("score_l2_fitted")
 
         obj.model_ = tf.keras.models.load_model(
             os.path.join(path, "model.keras"),
@@ -91,11 +151,9 @@ class EcoLocator:
             "num_covs": self.num_covs_,
             "transforms": self.transforms_,
             "cov_transforms": self.cov_transforms,
-            "nlayers": self.nlayers,
-            "width": self.width,
-            "dropout_prop": self.dropout_prop,
-            "loc_weight": self.loc_weight,
-            "env_weight": self.env_weight,
+            "score_l2_fitted": _json_value(self.score_l2_),
+            "network": self.network_,
+            **{k: _json_value(getattr(self, k)) for k in HYPERPARAMETERS},
         }
         with open(os.path.join(path, "params.json"), "w") as f:
             json.dump(params, f)
@@ -113,6 +171,7 @@ class EcoLocator:
         seed: int = None,
         verbose: int = 1,
     ) -> "EcoLocator":
+        self._check_refittable()
         rng = np.random.default_rng(seed)
 
         genotypes, samples, _ = self._get_genotypes(genotype_path)
@@ -158,31 +217,81 @@ class EcoLocator:
 
         self.num_covs_ = num_covs
         self.seed_ = seed
-        if seed is not None:
-            # Weight initialization, dropout masks, and batch shuffling draw
-            # from TensorFlow's own RNG, which the NumPy seed does not reach.
-            tf.keras.utils.set_random_seed(seed)
-        self.model_ = build_network(
-            n_snps=traingen.shape[1],
-            num_covs=num_covs,
-            nlayers=self.nlayers,
-            width=self.width,
-            dropout_prop=self.dropout_prop,
-            loc_weight=self.loc_weight,
-            env_weight=self.env_weight,
-        )
-        self.history_ = train_network(
-            self.model_,
-            traingen,
-            testgen,
-            trainlocs,
-            testlocs,
-            max_epochs=max_epochs,
-            batch_size=batch_size,
-            patience=patience,
-            verbose=verbose,
+        self.model_, self.history_, self.score_l2_, self.score_l2_losses_ = (
+            self._fit_network(
+                traingen,
+                testgen,
+                trainlocs,
+                testlocs,
+                num_covs=num_covs,
+                seed=seed,
+                max_epochs=max_epochs,
+                batch_size=batch_size,
+                patience=patience,
+                verbose=verbose,
+            )
         )
         return self
+
+    def _fit_network(
+        self,
+        traingen,
+        testgen,
+        trainlocs,
+        testlocs,
+        *,
+        num_covs,
+        seed,
+        max_epochs,
+        batch_size,
+        patience,
+        verbose,
+    ):
+        """Fit the network on one split: traingen/trainlocs to fit, and
+        testgen/testlocs for early stopping and the choice of the score
+        penalty. Genotypes are standardized with the means and SDs of both
+        sets together. The network is fitted once per penalty of score_l2,
+        from the same seed, and the fit with the lowest covariate validation
+        loss (MSE) is kept. Returns that model, its history, its penalty,
+        and each penalty's validation loss."""
+        if len(testgen) == 0:
+            raise ValueError(
+                "no validation samples: train_split leaves none, and early "
+                "stopping and the penalty search need them"
+            )
+        geno_mean, geno_sd = _column_mean_sd(traingen, testgen)
+        penalties = [0.0] if num_covs == 0 else _penalties(self.score_l2)
+        settings = {k: getattr(self, k) for k in HYPERPARAMETERS if k != "score_l2"}
+        best, losses = None, {}
+        for penalty in penalties:
+            if seed is not None:
+                # Weight initialization, dropout masks, and batch shuffling
+                # draw from TensorFlow's own RNG, which the NumPy seed does
+                # not reach.
+                tf.keras.utils.set_random_seed(seed)
+            model = build_pgs_network(num_covs, geno_mean, geno_sd, penalty, **settings)
+            history = train_network(
+                model,
+                traingen,
+                testgen,
+                trainlocs,
+                testlocs,
+                max_epochs=max_epochs,
+                batch_size=batch_size,
+                patience=patience,
+                verbose=verbose,
+            )
+            # Early stopping restores the epoch with the lowest validation
+            # loss; that epoch's covariate validation loss decides.
+            h = history.history
+            key = f"val_{model.output_names[1]}_loss" if num_covs > 0 else "val_loss"
+            # A diverged fit (NaN loss) counts as the worst.
+            val_loss = np.nan_to_num(h["val_loss"], nan=np.inf)
+            loss = float(h[key][int(np.argmin(val_loss))])
+            losses[penalty] = loss if np.isfinite(loss) else np.inf
+            if best is None or losses[penalty] < losses[best[2]]:
+                best = (model, history, penalty)
+        return (*best, losses)
 
     def predict(
         self,
@@ -247,6 +356,12 @@ class EcoLocator:
         network initialization depend only on ``seed`` and the fold index,
         so a fold gives the same prediction in any chunk.
 
+        Each fold fits the network as fit() does, once per penalty of
+        ``score_l2``, so a fold costs that many fits; the penalty each fold
+        chose is in ``self.loo_score_l2_``. For a cheaper LOO, fix
+        ``score_l2`` to one number, for example the penalty that fit() chose
+        on all samples.
+
         With ``shap_background_size``, each fold also computes SHAP values
         for its held-out sample, from the model that did not see it, with a
         background of that many training samples. They are stored in
@@ -254,6 +369,7 @@ class EcoLocator:
         ``snp_ids`` (n_snps), ``outputs`` (x, y, then covariates), and
         ``values`` (n_folds x n_snps x n_outputs).
         """
+        self._check_refittable()
         rng = np.random.default_rng(seed)
         genotypes, samples, all_snp_ids = self._get_genotypes(genotype_path)
         sample_data, locs = sort_samples(samples, sample_data_path)
@@ -270,6 +386,7 @@ class EcoLocator:
         )
         ac = replace_missing_data(genotypes, rng=rng)
         fold_shap = []
+        fold_penalties = []
 
         known = np.argwhere(~np.isnan(locs[:, 0])).flatten()
         fold_ids = np.arange(len(known))[fold_start:fold_stop]
@@ -284,11 +401,12 @@ class EcoLocator:
             )
             if seed is not None:
                 fold_rng = np.random.default_rng([seed, fold])
-                tf.keras.utils.set_random_seed(
-                    int(np.random.SeedSequence([seed, fold]).generate_state(1)[0])
+                fold_seed = int(
+                    np.random.SeedSequence([seed, fold]).generate_state(1)[0]
                 )
             else:
                 fold_rng = rng
+                fold_seed = None
             loo_locs = locs.copy()
             loo_locs[i] = np.nan
 
@@ -316,26 +434,19 @@ class EcoLocator:
 
             predgen = np.transpose(ac[:, [i]])
 
-            model = build_network(
-                n_snps=traingen.shape[1],
-                num_covs=num_covs,
-                nlayers=self.nlayers,
-                width=self.width,
-                dropout_prop=self.dropout_prop,
-                loc_weight=self.loc_weight,
-                env_weight=self.env_weight,
-            )
-            train_network(
-                model,
+            model, _, penalty, _ = self._fit_network(
                 traingen,
                 testgen,
                 trainlocs,
                 testlocs,
+                num_covs=num_covs,
+                seed=fold_seed,
                 max_epochs=max_epochs,
                 batch_size=batch_size,
                 patience=patience,
                 verbose=verbose,
             )
+            fold_penalties.append(penalty)
 
             prediction = model.predict(predgen)
             if shap_background_size is not None:
@@ -377,6 +488,8 @@ class EcoLocator:
 
             del model
             tf.keras.backend.clear_session()
+
+        self.loo_score_l2_ = np.array(fold_penalties)
 
         if shap_background_size is not None:
             self.loo_shap_ = {
@@ -513,6 +626,15 @@ class EcoLocator:
                 vals = shap_env[:, :, var_idx - 2]
             summary[var] = np.abs(vals).mean(axis=0)
         return pd.DataFrame(summary)
+
+    def _check_refittable(self):
+        """fit() and fit_predict_loo() build the EcoLocator network; a model
+        loaded from the dense network (build_network) cannot be refitted."""
+        if self.network_ != "pgs":
+            raise ValueError(
+                "this model was saved with the dense network (build_network); "
+                "fit a new EcoLocator instead"
+            )
 
     def _get_genotypes(self, genotype_path: str):
         if genotype_path.endswith(".zarr"):

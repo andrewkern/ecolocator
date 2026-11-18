@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 import typer
+
+from .settings import NETWORK_DEFAULTS as D
+
+# The default penalty grid as the command line takes it: "20,60,200,600".
+SCORE_L2_DEFAULT = ",".join(f"{v:g}" for v in D["score_l2"])
 
 
 app = typer.Typer(
@@ -11,6 +16,57 @@ app = typer.Typer(
     help="EcoLocator: predict geographic origin and environmental covariates from genotype data.",
     no_args_is_help=True,
 )
+
+# Network options shared by train and loo; see EcoLocator for their meaning.
+NLayers = Annotated[
+    int, typer.Option(help="Number of hidden layers in the location trunk.")
+]
+Width = Annotated[int, typer.Option(help="Units per hidden layer of the trunk.")]
+DropoutProp = Annotated[float, typer.Option(help="Dropout after each trunk layer.")]
+InputDropout = Annotated[
+    float, typer.Option(help="Dropout on the genotypes entering the trunk.")
+]
+WeightDecay = Annotated[
+    float, typer.Option(help="L2 weight decay of the trunk and heads.")
+]
+HeadWidth = Annotated[
+    int, typer.Option(help="Units of each covariate's correction head.")
+]
+ScoreL2 = Annotated[
+    str,
+    typer.Option(
+        help="L2 penalty of the polygenic scores: one number, or comma-separated "
+        "numbers to try (the one with the lowest covariate validation loss is kept)."
+    ),
+]
+LocWeight = Annotated[float, typer.Option(help="Loss weight on the location head.")]
+EnvWeight = Annotated[
+    float, typer.Option(help="Loss weight on the environmental-covariate head.")
+]
+
+
+def _make_model(cov_transforms: Optional[str], score_l2: str, **settings):
+    """An EcoLocator from the command-line options. score_l2 is a
+    comma-separated list; one value fixes the penalty."""
+    from .ecolocator_class import EcoLocator
+
+    try:
+        penalties = tuple(float(v) for v in score_l2.split(","))
+    except ValueError:
+        raise typer.BadParameter(
+            f"{score_l2!r}: give one number or comma-separated numbers",
+            param_hint="--score-l2",
+        )
+    try:
+        return EcoLocator(
+            cov_transforms=[t.strip() for t in cov_transforms.split(",")]
+            if cov_transforms
+            else None,
+            score_l2=penalties,
+            **settings,
+        )
+    except ValueError as e:
+        raise typer.BadParameter(str(e), param_hint="--score-l2")
 
 
 @app.command()
@@ -39,13 +95,15 @@ def train(
         file_okay=False,
         help="Directory to save the fitted model (model.keras, arrays.npz, params.json).",
     ),
-    nlayers: int = typer.Option(10, help="Number of hidden layers in the trunk."),
-    width: int = typer.Option(256, help="Units per hidden layer."),
-    dropout_prop: float = typer.Option(0.25, help="Dropout proportion."),
-    loc_weight: float = typer.Option(1.0, help="Loss weight on the location head."),
-    env_weight: float = typer.Option(
-        1.0, help="Loss weight on the environmental-covariate head."
-    ),
+    nlayers: NLayers = D["nlayers"],
+    width: Width = D["width"],
+    dropout_prop: DropoutProp = D["dropout_prop"],
+    input_dropout: InputDropout = D["input_dropout"],
+    weight_decay: WeightDecay = D["weight_decay"],
+    head_width: HeadWidth = D["head_width"],
+    score_l2: ScoreL2 = SCORE_L2_DEFAULT,
+    loc_weight: LocWeight = D["loc_weight"],
+    env_weight: EnvWeight = D["env_weight"],
     cov_transforms: Optional[str] = typer.Option(
         None,
         help="Comma-separated per-covariate transforms (e.g. 'none,log,log'). Valid: none, log.",
@@ -70,17 +128,15 @@ def train(
     ),
 ) -> None:
     """Train an EcoLocator model and save it to OUT."""
-    from .ecolocator_class import EcoLocator
-
-    transforms = (
-        [t.strip() for t in cov_transforms.split(",")] if cov_transforms else None
-    )
-
-    model = EcoLocator(
-        cov_transforms=transforms,
+    model = _make_model(
+        cov_transforms,
+        score_l2,
         nlayers=nlayers,
         width=width,
         dropout_prop=dropout_prop,
+        input_dropout=input_dropout,
+        weight_decay=weight_decay,
+        head_width=head_width,
         loc_weight=loc_weight,
         env_weight=env_weight,
     )
@@ -195,13 +251,15 @@ def loo(
     shap_background_size: int = typer.Option(
         100, help="Training samples used as the SHAP background in each fold."
     ),
-    nlayers: int = typer.Option(10, help="Number of hidden layers in the trunk."),
-    width: int = typer.Option(256, help="Units per hidden layer."),
-    dropout_prop: float = typer.Option(0.25, help="Dropout proportion."),
-    loc_weight: float = typer.Option(1.0, help="Loss weight on the location head."),
-    env_weight: float = typer.Option(
-        1.0, help="Loss weight on the environmental-covariate head."
-    ),
+    nlayers: NLayers = D["nlayers"],
+    width: Width = D["width"],
+    dropout_prop: DropoutProp = D["dropout_prop"],
+    input_dropout: InputDropout = D["input_dropout"],
+    weight_decay: WeightDecay = D["weight_decay"],
+    head_width: HeadWidth = D["head_width"],
+    score_l2: ScoreL2 = SCORE_L2_DEFAULT,
+    loc_weight: LocWeight = D["loc_weight"],
+    env_weight: EnvWeight = D["env_weight"],
     cov_transforms: Optional[str] = typer.Option(
         None,
         help="Comma-separated per-covariate transforms (e.g. 'none,log,log'). Valid: none, log.",
@@ -226,17 +284,15 @@ def loo(
     ),
 ) -> None:
     """Leave-one-out fit-and-predict over all samples with known coordinates."""
-    from .ecolocator_class import EcoLocator
-
-    transforms = (
-        [t.strip() for t in cov_transforms.split(",")] if cov_transforms else None
-    )
-
-    el = EcoLocator(
-        cov_transforms=transforms,
+    el = _make_model(
+        cov_transforms,
+        score_l2,
         nlayers=nlayers,
         width=width,
         dropout_prop=dropout_prop,
+        input_dropout=input_dropout,
+        weight_decay=weight_decay,
+        head_width=head_width,
         loc_weight=loc_weight,
         env_weight=env_weight,
     )
@@ -256,6 +312,10 @@ def loo(
         fold_stop=fold_stop,
         shap_background_size=shap_background_size if shap_out else None,
     )
+    if set(result.columns) - {"sampleID", "x", "y"}:
+        # The score penalty that each fold chose (rows are folds). The
+        # name has a prefix, so that it cannot replace a covariate column.
+        result["fold_score_l2"] = el.loo_score_l2_
     out.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(out, sep="\t", index=False)
     if shap_out is not None:

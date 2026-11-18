@@ -5,11 +5,15 @@ import tensorflow as tf
 from ecolocator import EcoLocator
 from ecolocator.utils import replace_missing_data, sort_samples
 
+# A small network with one fixed score penalty, so that each fit trains once.
+# The penalty search has its own tests.
+SMALL = dict(nlayers=2, width=32, score_l2=60.0)
+
 
 def test_fit_returns_self(example_data):
     """testing that fit() returns the EcoLocator instance for method chaining"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     result = model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -23,7 +27,7 @@ def test_fit_returns_self(example_data):
 def test_fit_sets_attributes(example_data):
     """testing that fit() sets expected attributes on the EcoLocator instance"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -46,7 +50,7 @@ def test_fit_sets_attributes(example_data):
 def test_predict_returns_dataframe(example_data, tmp_path):
     """testing that predict() returns a DataFrame with correct columns"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -72,7 +76,7 @@ def test_predict_returns_dataframe(example_data, tmp_path):
 def test_predict_positive_with_log_transform(example_data, tmp_path):
     """predict() with log transform always returns positive covariate values"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32, cov_transforms=["none", "none", "log"])
+    model = EcoLocator(**SMALL, cov_transforms=["none", "none", "log"])
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -95,7 +99,7 @@ def test_predict_positive_with_log_transform(example_data, tmp_path):
 def test_fit_predict_loo_returns_all_samples(example_data):
     """fit_predict_loo() returns one prediction row per known sample"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     result = model.fit_predict_loo(
         str(matrix_path),
         str(sample_data_path),
@@ -115,7 +119,7 @@ def test_fit_predict_loo_returns_all_samples(example_data):
 def test_fit_predict_loo_max_folds(example_data):
     """fit_predict_loo() with max_folds returns exactly that many prediction rows"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     result = model.fit_predict_loo(
         str(matrix_path),
         str(sample_data_path),
@@ -132,7 +136,7 @@ def test_fit_predict_loo_max_folds(example_data):
 def test_fit_predict_loo_fold_range(example_data):
     """fold_start/fold_stop hold out exactly the samples in that fold range"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     result = model.fit_predict_loo(
         str(matrix_path),
         str(sample_data_path),
@@ -161,10 +165,10 @@ def test_fit_predict_loo_chunk_matches_full_run(example_data):
     """With a seed, a fold run alone gives the same prediction as in a full run"""
     _, _, matrix_path, sample_data_path = example_data
     kwargs = dict(max_epochs=5, patience=3, train_split=0.6, min_mac=1, seed=7)
-    full = EcoLocator(nlayers=2, width=32).fit_predict_loo(
+    full = EcoLocator(**SMALL).fit_predict_loo(
         str(matrix_path), str(sample_data_path), fold_stop=3, **kwargs
     )
-    chunk = EcoLocator(nlayers=2, width=32).fit_predict_loo(
+    chunk = EcoLocator(**SMALL).fit_predict_loo(
         str(matrix_path), str(sample_data_path), fold_start=2, fold_stop=3, **kwargs
     )
 
@@ -177,10 +181,10 @@ def test_fit_predict_loo_shap(example_data):
     """LOO with SHAP stores one SHAP row per fold and leaves predictions unchanged"""
     _, _, matrix_path, sample_data_path = example_data
     kwargs = dict(max_epochs=5, patience=3, train_split=0.6, min_mac=1, seed=5)
-    plain = EcoLocator(nlayers=2, width=32).fit_predict_loo(
+    plain = EcoLocator(**SMALL).fit_predict_loo(
         str(matrix_path), str(sample_data_path), fold_stop=3, **kwargs
     )
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     with_shap = model.fit_predict_loo(
         str(matrix_path),
         str(sample_data_path),
@@ -209,7 +213,7 @@ def test_fit_seed_is_reproducible(tmp_path, example_data):
     sample_data.to_csv(masked_path, sep="\t", index=False)
     preds = []
     for _ in range(2):
-        model = EcoLocator(nlayers=2, width=32)
+        model = EcoLocator(**SMALL)
         model.fit(
             str(matrix_path),
             str(masked_path),
@@ -228,7 +232,7 @@ def test_fit_seed_is_reproducible(tmp_path, example_data):
 def test_save_load_roundtrip(tmp_path, example_data):
     """save() and load() round-trip restores all attributes and hyperparameters"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -253,7 +257,7 @@ def test_save_load_roundtrip(tmp_path, example_data):
 def test_load_predict_matches(tmp_path, example_data):
     """a model loaded from disk produces a valid prediction DataFrame"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -281,7 +285,7 @@ def test_load_predict_matches(tmp_path, example_data):
 def test_shap_values_not_fitted_raises(example_data):
     """testing that shap_values() raises RuntimeError if called before fit()"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     with pytest.raises(RuntimeError):
         model.shap_values(
             str(matrix_path),
@@ -294,7 +298,7 @@ def test_shap_values_not_fitted_raises(example_data):
 def test_shap_values_returns_dataframe(example_data, tmp_path):
     """testing that shap_values() returns a summary DataFrame with one row per SNP"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -327,7 +331,7 @@ def test_shap_values_returns_dataframe(example_data, tmp_path):
 def test_shap_values_min_maf_filters_columns(example_data, tmp_path):
     """testing that shap_values() with min_maf filters out low-frequency SNPs"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -362,7 +366,7 @@ def test_shap_values_min_maf_filters_columns(example_data, tmp_path):
 def test_fit_no_covariates(no_covariate_data):
     """fit() works with x and y only — no covariate columns"""
     matrix_path, sample_data_path = no_covariate_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -378,7 +382,7 @@ def test_fit_no_covariates(no_covariate_data):
 def test_predict_no_covariates(no_covariate_data, tmp_path):
     """predict() with no covariates returns only sampleID, x, y columns"""
     matrix_path, sample_data_path = no_covariate_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -399,7 +403,7 @@ def test_predict_no_covariates(no_covariate_data, tmp_path):
 def test_fit_predict_loo_no_covariates(no_covariate_data):
     """fit_predict_loo() works with no covariates and returns only x, y columns"""
     matrix_path, sample_data_path = no_covariate_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     result = model.fit_predict_loo(
         str(matrix_path),
         str(sample_data_path),
@@ -416,7 +420,7 @@ def test_fit_predict_loo_no_covariates(no_covariate_data):
 def test_shap_values_no_covariates(no_covariate_data, tmp_path):
     """shap_values() with no covariates returns only snp_id, x, y columns"""
     matrix_path, sample_data_path = no_covariate_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -442,7 +446,7 @@ def test_shap_values_no_covariates(no_covariate_data, tmp_path):
 def test_shap_values_raw_returns_wide_format(example_data, tmp_path):
     """shap_values() with raw=True returns one row per unknown sample with all SNP×variable columns"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -476,7 +480,7 @@ def test_shap_values_raw_returns_wide_format(example_data, tmp_path):
 def test_shap_values_raw_no_covariates(no_covariate_data, tmp_path):
     """shap_values() raw=True with no covariates returns only _x and _y SHAP columns"""
     matrix_path, sample_data_path = no_covariate_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -508,7 +512,7 @@ def test_shap_values_raw_no_covariates(no_covariate_data, tmp_path):
 def test_shap_values_raw_satisfies_additivity_location(example_data, tmp_path):
     """test that signed per-SNP SHAP values for the location head sum to (model output - baseline)"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -569,7 +573,7 @@ def test_shap_values_raw_satisfies_additivity_location(example_data, tmp_path):
 def test_shap_values_raw_satisfies_additivity_env(example_data, tmp_path):
     """test that signed per-SNP SHAP values for the env head sum to (model output - baseline)"""
     _, _, matrix_path, sample_data_path = example_data
-    model = EcoLocator(nlayers=2, width=32)
+    model = EcoLocator(**SMALL)
     model.fit(
         str(matrix_path),
         str(sample_data_path),
@@ -625,3 +629,201 @@ def test_shap_values_raw_satisfies_additivity_env(example_data, tmp_path):
         shap_sum = sum(row[f"{snp_id}_{cov}"] for snp_id in snp_ids)
         identity = shap_sum + baseline_env[out_idx]
         assert np.isclose(identity, raw_env[0, out_idx], atol=2.0)
+
+
+def test_fit_chooses_score_penalty(example_data):
+    """testing that fit() tries every penalty of score_l2 and keeps the lowest validation loss"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**{**SMALL, "score_l2": (2.0, 200.0)})
+    model.fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=5,
+        patience=3,
+        train_split=0.6,
+        seed=3,
+    )
+    assert set(model.score_l2_losses_) == {2.0, 200.0}
+    assert model.score_l2_ == min(
+        model.score_l2_losses_, key=model.score_l2_losses_.get
+    )
+
+
+def test_fit_fixed_score_penalty(example_data):
+    """testing that one number for score_l2 skips the penalty search"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL)
+    model.fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=5,
+        patience=3,
+        train_split=0.6,
+    )
+    assert list(model.score_l2_losses_) == [60.0]
+    assert model.score_l2_ == 60.0
+
+
+def test_fit_predict_loo_records_fold_penalties(example_data):
+    """testing that LOO records the penalty that each fold chose"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**{**SMALL, "score_l2": (2.0, 200.0)})
+    model.fit_predict_loo(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=1,
+        patience=1,
+        train_split=0.6,
+        max_folds=2,
+        seed=1,
+    )
+    assert len(model.loo_score_l2_) == 2
+    assert set(model.loo_score_l2_) <= {2.0, 200.0}
+
+
+def test_save_load_keeps_fitted_penalty(tmp_path, example_data):
+    """testing that a saved and loaded model keeps the penalty that fit() chose"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**SMALL)
+    model.fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=1,
+        patience=1,
+        train_split=0.6,
+    )
+    model.save(str(tmp_path / "m"))
+    assert EcoLocator.load(str(tmp_path / "m")).score_l2_ == 60.0
+
+
+def test_load_model_of_dense_network(tmp_path, example_data):
+    """testing that a model saved with the dense network (build_network) loads and predicts"""
+    import json
+
+    from ecolocator.network import build_network
+
+    _, _, matrix_path, sample_data_path = example_data
+    fitted = EcoLocator(**SMALL)
+    fitted.fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=1,
+        patience=1,
+        train_split=0.6,
+    )
+    fitted.save(str(tmp_path / "m"))
+    # Rewrite the saved model as one of the dense network: its model file,
+    # and parameters with only its settings.
+    build_network(
+        n_snps=len(fitted._kept_snp_indices_),
+        num_covs=fitted.num_covs_,
+        nlayers=2,
+        width=32,
+    ).save(str(tmp_path / "m" / "model.keras"))
+    params = json.loads((tmp_path / "m" / "params.json").read_text())
+    old = {
+        k: params[k]
+        for k in (
+            "seed",
+            "cov_names",
+            "num_covs",
+            "transforms",
+            "cov_transforms",
+            "loc_weight",
+            "env_weight",
+        )
+    }
+    old.update(nlayers=2, width=32, dropout_prop=0.25)
+    (tmp_path / "m" / "params.json").write_text(json.dumps(old))
+    loaded = EcoLocator.load(str(tmp_path / "m"))
+    assert loaded.score_l2_ is None
+    assert loaded.network_ == "dense"
+    with pytest.raises(ValueError, match="dense network"):
+        loaded.fit(str(matrix_path), str(sample_data_path), max_epochs=1, patience=1)
+    with pytest.raises(ValueError, match="dense network"):
+        loaded.fit_predict_loo(
+            str(matrix_path), str(sample_data_path), max_epochs=1, patience=1
+        )
+    sd = pd.read_csv(sample_data_path, sep="\t")
+    sd.loc[:4, ["x", "y"]] = np.nan
+    sd.to_csv(tmp_path / "pred_samples.tsv", sep="\t", index=False)
+    assert (
+        len(loaded.predict(str(matrix_path), str(tmp_path / "pred_samples.tsv"))) == 5
+    )
+
+
+def test_fit_without_validation_samples_raises(example_data):
+    """testing that a train_split leaving no validation samples gives a clear error"""
+    _, _, matrix_path, sample_data_path = example_data
+    with pytest.raises(ValueError, match="no validation samples"):
+        EcoLocator(**SMALL).fit(
+            str(matrix_path),
+            str(sample_data_path),
+            max_epochs=1,
+            patience=1,
+            train_split=1.0,
+        )
+
+
+def test_invalid_score_l2_raises(example_data):
+    """testing that an empty or negative penalty grid gives a clear error"""
+    _, _, matrix_path, sample_data_path = example_data
+    for bad in ((), (-1.0,)):
+        with pytest.raises(ValueError, match="score_l2"):
+            EcoLocator(**{**SMALL, "score_l2": bad}).fit(
+                str(matrix_path),
+                str(sample_data_path),
+                max_epochs=1,
+                patience=1,
+                train_split=0.6,
+            )
+
+
+def test_save_numpy_score_l2(tmp_path, example_data):
+    """testing that a model with a NumPy penalty grid saves and loads"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**{**SMALL, "score_l2": np.array([20.0, 60.0])}).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=1,
+        patience=1,
+        train_split=0.6,
+    )
+    model.save(str(tmp_path / "m"))
+    loaded = EcoLocator.load(str(tmp_path / "m"))
+    assert list(loaded.score_l2) == [20.0, 60.0]
+    assert loaded.network_ == "pgs"
+
+
+def test_invalid_score_l2_raises_at_construction():
+    """testing that a bad penalty is refused when the model is made, with or without covariates"""
+    for bad in ((), (-1.0,), float("inf"), "abc"):
+        with pytest.raises(ValueError, match="score_l2"):
+            EcoLocator(**{**SMALL, "score_l2": bad})
+
+
+def test_save_zero_dimensional_score_l2(tmp_path, example_data):
+    """testing that a model with a 0-d array penalty saves and loads"""
+    _, _, matrix_path, sample_data_path = example_data
+    model = EcoLocator(**{**SMALL, "score_l2": np.array(60.0)}).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=1,
+        patience=1,
+        train_split=0.6,
+    )
+    model.save(str(tmp_path / "m"))
+    assert EcoLocator.load(str(tmp_path / "m")).score_l2 == 60.0
+
+
+def test_column_mean_sd_in_row_chunks():
+    """testing that the chunked mean and SD equal those of the stacked blocks"""
+    from ecolocator.ecolocator_class import _column_mean_sd
+
+    rng = np.random.default_rng(0)
+    a = rng.integers(0, 3, size=(7, 5)).astype(np.uint8)
+    b = rng.integers(0, 3, size=(4, 5)).astype(np.uint8)
+    mean, sd = _column_mean_sd(a, b, rows=3)
+    both = np.vstack([a, b]).astype(float)
+    np.testing.assert_allclose(mean, both.mean(axis=0))
+    np.testing.assert_allclose(sd, both.std(axis=0))
