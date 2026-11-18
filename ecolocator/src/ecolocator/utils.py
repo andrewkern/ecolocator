@@ -274,7 +274,7 @@ def normalize_locs(
 
     x_norm = (locs[:, 0] - meanlong) / sdlong
     y_norm = (locs[:, 1] - meanlat) / sdlat
-    cov_norm = (cov_data - means) / sds
+    cov_norm = transform_env(locs[:, 2:], means, sds, transforms)
     norm_locs = np.column_stack([x_norm, y_norm, cov_norm])
 
     return meanlong, sdlong, meanlat, sdlat, means, sds, transforms, norm_locs
@@ -291,3 +291,70 @@ def back_transform_env(
         if t == "log":
             result[:, i] = np.exp(result[:, i])
     return result
+
+
+def transform_env(
+    values: np.ndarray,
+    means: np.ndarray,
+    sds: np.ndarray,
+    transforms: list,
+) -> np.ndarray:
+    """Normalize covariate values (n x covariates) as normalize_locs does:
+    the inverse of back_transform_env."""
+    result = np.array(values, dtype=float, ndmin=2)
+    for i, t in enumerate(transforms):
+        if t == "log":
+            result[:, i] = np.log(result[:, i])
+    return (result - means) / sds
+
+
+def _as_matrix(values) -> np.ndarray:
+    """Samples x covariates as a float array (a vector is one covariate)."""
+    values = np.asarray(values, dtype=float)
+    return values.reshape(len(values), -1)
+
+
+def env_weights(
+    observed: np.ndarray,
+    predicted: np.ndarray,
+    location_route: np.ndarray,
+) -> np.ndarray:
+    """How much of each covariate a prediction explains beyond its location
+    route: R^2(c ~ route + prediction) - R^2(c ~ route), by least squares
+    with an intercept, floored at 0. Arrays are samples x covariates
+    (observed values, EcoLocator's predictions, and its location-route
+    predictions) for samples the model did not train on.
+
+    A covariate that varies with location but not with the genotype beyond
+    location gets a weight near 0; one under selection keeps a positive
+    weight, from the polygenic score."""
+    observed, predicted, location_route = (
+        _as_matrix(a) for a in (observed, predicted, location_route)
+    )
+
+    def r2(y, *xs):
+        x = np.column_stack([np.ones(len(y)), *xs])
+        fitted = x @ np.linalg.lstsq(x, y, rcond=None)[0]
+        total = np.sum((y - y.mean()) ** 2)
+        # A covariate without variance has nothing to explain.
+        return 1 - np.sum((y - fitted) ** 2) / total if total > 0 else 0.0
+
+    return np.array(
+        [
+            max(
+                0.0,
+                r2(observed[:, j], location_route[:, j], predicted[:, j])
+                - r2(observed[:, j], location_route[:, j]),
+            )
+            for j in range(observed.shape[1])
+        ]
+    )
+
+
+def env_errors(observed: np.ndarray, predicted: np.ndarray) -> np.ndarray:
+    """Mean squared error of each covariate's prediction (samples x
+    covariates, normalized units), for samples the model did not train on.
+    offset() divides each covariate's weight by it, so that covariates the
+    network predicts poorly count less."""
+    observed, predicted = _as_matrix(observed), _as_matrix(predicted)
+    return np.mean((observed - predicted) ** 2, axis=0)

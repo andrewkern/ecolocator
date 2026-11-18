@@ -126,3 +126,42 @@ def test_score_l2_trailing_comma_is_a_usage_error(example_data, tmp_path):
     assert result.exit_code == 2
     assert "score-l2" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     assert not (tmp_path / "m").exists()
+
+
+def test_offset_writes_one_row_per_sample_and_site(example_data_30, tmp_path):
+    """testing that `ecolocator offset` writes one offset per sample and site"""
+    _, _, matrix_path, sample_data_path = example_data_30
+    model = EcoLocator(nlayers=2, width=32, score_l2=60.0).fit(
+        str(matrix_path),
+        str(sample_data_path),
+        max_epochs=3,
+        patience=2,
+        train_split=0.6,
+        seed=3,
+        weight_folds=2,
+    )
+    model.save(str(tmp_path / "m"))
+    pd.DataFrame(
+        {"site": ["a", "b"], "cov1": [0.2, 0.8], "cov2": [0.5, 0.1], "cov3": [0.3, 0.9]}
+    ).to_csv(tmp_path / "sites.tsv", sep="\t", index=False)
+    out = tmp_path / "offsets.tsv"
+    result = CliRunner().invoke(
+        app,
+        [
+            "offset",
+            "--model",
+            str(tmp_path / "m"),
+            "--genotypes",
+            str(matrix_path),
+            "--sample-data",
+            str(sample_data_path),
+            "--sites",
+            str(tmp_path / "sites.tsv"),
+            "--out",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    off = pd.read_csv(out, sep="\t")
+    assert len(off) == 60
+    assert set(off.site) == {"a", "b"}

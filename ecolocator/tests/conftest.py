@@ -5,10 +5,8 @@ import msprime
 import allel
 
 
-@pytest.fixture(scope="session")
-def example_data(tmp_path_factory):
+def _simulate(tmp_path_factory, num_individuals):
     num_covariates = 3
-    num_individuals = 5
     random_seed = 1024
     # use msprime to simulate some data
     ts = msprime.sim_ancestry(
@@ -50,6 +48,17 @@ def example_data(tmp_path_factory):
     sample_data_df.to_csv(sample_data_path, sep="\t", index=True)
 
     return (vcf_path, zarr_path, matrix_path, sample_data_path)
+
+
+@pytest.fixture(scope="session")
+def example_data(tmp_path_factory):
+    return _simulate(tmp_path_factory, 5)
+
+
+@pytest.fixture(scope="session")
+def example_data_30(tmp_path_factory):
+    """Enough samples for cross-fitted covariate weights."""
+    return _simulate(tmp_path_factory, 30)
 
 
 @pytest.fixture(scope="session")

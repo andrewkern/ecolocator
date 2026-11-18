@@ -27,7 +27,8 @@ model.save("my_model")
 ```
 
 `save()` writes a directory containing `model.keras`, `arrays.npz`, and
-`params.json`.
+`params.json`, and, for a model with covariates, `location_route.keras`
+(see Genomic offset).
 
 ### Network settings
 
@@ -75,6 +76,62 @@ predictions = model.predict(
 )
 print(predictions)  # DataFrame: sampleID, x, y, <covariates...>
 ```
+
+## Genomic offset
+
+After the network, `fit()` trains a location route: for each covariate, a
+small head that predicts it from the predicted location alone.
+`model.env_weights_` holds how much of each covariate the network predicts
+beyond its location route, R²(c ~ route + prediction) − R²(c ~ route),
+floored at 0, from cross-fitted predictions of all samples with known
+coordinates: `fit(..., weight_folds=5)` fits the network and its route on
+4/5 of the samples and predicts the rest, five times. This costs five more
+network fits; `weight_folds=0` uses the validation samples of the main fit
+only, which is cheaper but noisy when there are few of them. A covariate that varies with location but
+not with the genotypes beyond location gets a weight near 0; a covariate
+under selection keeps a positive weight from its polygenic score.
+
+`model.env_mse_` holds each covariate's cross-fitted prediction error
+(mean squared error in normalized units), from the same folds.
+
+`offset()` gives the genomic offset of every sample in the sample data to
+each site (for example a common garden or a future climate): the Euclidean
+distance between the covariates EcoLocator predicts for the sample and
+those of the site, in normalized units, with each covariate weighted by
+`env_weights_ / env_mse_` (`model.offset_weights_`). A covariate counts
+more when the genotype predicts it beyond location and when the network
+predicts it well. `weights=` replaces `env_weights_`;
+`scale_by_error=False` drops the division by `env_mse_`.
+
+Every prediction comes from a model that did not see the sample. Samples
+that `fit()` trained on (for example trees of known origin) use their
+out-of-fold predictions from the weight folds
+(`model.crossfit_predictions_`), whether or not their x/y are given; all
+other samples use the fitted model. A training sample is recognized by its
+ID and its genotypes, so another individual that reuses an ID is treated as
+new. Offsets of training samples therefore need `weight_folds` of 2 or
+more, and enough samples for the folds (`model.weight_folds_` is the number
+used; 0 means the weights come from the validation samples). Site values
+must be finite, and positive for covariates with the log transform.
+
+```python
+import pandas as pd
+
+# One row per site, a column for every covariate of the model, in the
+# same units as the sample metadata (not normalized).
+sites = pd.DataFrame(
+    {"cov1": [0.2, 0.8], "cov2": [0.5, 0.1], "cov3": [0.3, 0.9]},
+    index=["garden_a", "garden_b"],
+)
+offsets = model.offset(
+    genotype_path="./data/test_genotypes.vcf.gz",
+    sample_data_path="./data/test_sample_data_cov.txt",
+    sites=sites,
+)  # DataFrame: sampleID, site, offset
+```
+
+`predict(..., location_route=True)` adds the location-route prediction of
+each covariate (columns `<covariate>_location`).
 
 
 ## Leave-one-out
