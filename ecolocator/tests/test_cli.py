@@ -7,6 +7,12 @@ from typer.testing import CliRunner
 from ecolocator import EcoLocator
 from ecolocator.cli import app
 
+
+def _plain(output):
+    """CLI output without the color escape codes that rich may add."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", output)
+
+
 # A small, fixed-penalty network, so the CLI runs one fit per fold.
 _SMALL_NETWORK_ARGS = [
     "--nlayers",
@@ -64,7 +70,7 @@ def test_bad_score_l2_is_a_usage_error(example_data, tmp_path):
     result = CliRunner().invoke(app, args)
     assert result.exit_code == 2
     # Rich may color the message; drop the escape codes before searching.
-    assert "score-l2" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "score-l2" in _plain(result.output)
     assert not (tmp_path / "m").exists()
 
 
@@ -124,7 +130,7 @@ def test_score_l2_trailing_comma_is_a_usage_error(example_data, tmp_path):
     args += ["-o", str(tmp_path / "m"), "--score-l2", "20,60,"]
     result = CliRunner().invoke(app, args)
     assert result.exit_code == 2
-    assert "score-l2" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "score-l2" in _plain(result.output)
     assert not (tmp_path / "m").exists()
 
 
@@ -165,3 +171,35 @@ def test_offset_writes_one_row_per_sample_and_site(example_data_30, tmp_path):
     off = pd.read_csv(out, sep="\t")
     assert len(off) == 60
     assert set(off.site) == {"a", "b"}
+
+
+def test_gea_writes_results_and_summary(gea_files, tmp_path):
+    """testing that `ecolocator gea` writes one row per SNP and a summary per variable"""
+
+    def run(env):
+        return CliRunner().invoke(
+            app,
+            [
+                "gea",
+                "-g",
+                str(gea_files["genotypes"]),
+                "-s",
+                str(gea_files["samples"]),
+                "-l",
+                str(gea_files["locations"]),
+                "-o",
+                str(tmp_path / "gea.tsv"),
+                "--env",
+                env,
+            ],
+        )
+
+    result = run("env")
+    assert result.exit_code == 0, result.output
+    out = pd.read_csv(tmp_path / "gea.tsv", sep="\t")
+    assert set(out.env) == {"env"}
+    summary = pd.read_csv(tmp_path / "gea_summary.tsv", sep="\t")
+    assert list(summary.env) == ["env"]
+    bad = run("nope")
+    assert bad.exit_code == 2
+    assert "nope" in _plain(bad.output)

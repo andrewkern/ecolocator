@@ -6,7 +6,7 @@ import json
 import logging
 import tensorflow as tf
 from .utils import (
-    load_genotypes,
+    read_genotypes,
     sort_samples,
     normalize_locs,
     filter_snps,
@@ -1123,9 +1123,4 @@ class EcoLocator:
             )
 
     def _get_genotypes(self, genotype_path: str):
-        if genotype_path.endswith(".zarr"):
-            return load_genotypes(zarr_path=genotype_path)
-        elif genotype_path.endswith((".vcf", ".vcf.gz")):
-            return load_genotypes(vcf_path=genotype_path)
-        else:
-            return load_genotypes(matrix_path=genotype_path)
+        return read_genotypes(genotype_path)

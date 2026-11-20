@@ -554,3 +554,16 @@ def test_filter_snps_max_snps_above_available_raises():
     )
     with pytest.raises(ValueError, match="max_snps"):
         filter_snps(gt, min_mac=2, max_snps=5)
+
+
+def test_load_matrix_missing_and_bad_values(tmp_path):
+    """testing that a missing dosage is a missing call and other values are refused"""
+    m = pd.DataFrame({"sampleID": ["a", "b", "c"], "v0": [0, 1, 2], "v1": [2, None, 1]})
+    m.to_csv(tmp_path / "m.tsv", sep="\t", index=False)
+    genotypes, _, _ = load_genotypes(matrix_path=str(tmp_path / "m.tsv"))
+    np.testing.assert_array_equal(genotypes.is_missing(), [[0, 0, 0], [0, 1, 0]])
+    np.testing.assert_array_equal(genotypes.to_n_alt()[0], [0, 1, 2])
+    m.loc[0, "v0"] = 3
+    m.to_csv(tmp_path / "bad.tsv", sep="\t", index=False)
+    with pytest.raises(ValueError, match="only 0, 1, 2"):
+        load_genotypes(matrix_path=str(tmp_path / "bad.tsv"))

@@ -107,3 +107,45 @@ def sample_locs():
             [5.0, 6.0, 50.0, 500.0, 25.0],
         ]
     )
+
+
+def structured_gea(n=600, n_null=200, n_causal=5, seed=0):
+    """Samples on a 5 x 5 landscape. Null SNPs have allele frequencies that
+    change smoothly with location (population structure); the environment is
+    a smooth function of location plus a local part; causal SNPs follow the
+    local part of the environment, which location does not carry."""
+    rng = np.random.default_rng(seed)
+    xy = rng.uniform(0, 5, size=(n, 2))
+    local = rng.normal(size=n)
+    env = np.sin(xy[:, 0]) + 0.5 * xy[:, 1] + local
+    G = []
+    for _ in range(n_null):
+        a, b, c = rng.normal(size=3)
+        logit = a * np.sin(xy[:, 0] + c) + b * (xy[:, 1] - 2.5) / 2.5
+        G.append(rng.binomial(2, 1 / (1 + np.exp(-logit))))
+    for _ in range(n_causal):
+        G.append(rng.binomial(2, 1 / (1 + np.exp(-1.2 * local))))
+    return np.column_stack(G).astype(float), env, xy
+
+
+@pytest.fixture
+def gea_files(tmp_path):
+    """The files of `ecolocator gea` for structured_gea data (300 samples, 30
+    null and 3 causal SNPs): genotypes (dosage matrix), sample data (true
+    x, y, and the variable env), and predicted locations."""
+    G, env, xy = structured_gea(n=300, n_null=30, n_causal=3, seed=5)
+    ids = [f"s{i}" for i in range(len(G))]
+    g = pd.DataFrame(G.astype(int), columns=[f"v{j}" for j in range(G.shape[1])])
+    g.insert(0, "sampleID", ids)
+    g.to_csv(tmp_path / "g.tsv", sep="\t", index=False)
+    pd.DataFrame({"sampleID": ids, "x": 0.0, "y": 0.0, "env": env}).to_csv(
+        tmp_path / "s.tsv", sep="\t", index=False
+    )
+    pd.DataFrame({"sampleID": ids, "x": xy[:, 0], "y": xy[:, 1]}).to_csv(
+        tmp_path / "loc.tsv", sep="\t", index=False
+    )
+    return {
+        "genotypes": tmp_path / "g.tsv",
+        "samples": tmp_path / "s.tsv",
+        "locations": tmp_path / "loc.tsv",
+    }
